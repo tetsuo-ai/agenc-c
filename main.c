@@ -8,589 +8,892 @@
 #include "str.h"
 
 enum {
-    DEMO_REPLACE_IDX = 2,
-    DEMO_REPLACE_LEN = 2,
-    DEMO_INSERT_IDX = 4,
-    DEMO_REMOVE_IDX = 0,
-    DEMO_REMOVE_LEN = 2,
-    DEMO_SLICE_OFF = 6,
-    DEMO_SLICE_LEN = 5,
-    DEMO_SPLIT_CAP = 8,
-    DEMO_EMBEDDED_LEN = 3,
-    DEMO_RESERVE_LEN = 64,
-    DEMO_VIEW_PRINT_MAX = 64,
-    DEMO_NUM_BUF_LEN = 32,
-    DEMO_SEP = ','
+    DEMO_REPLACE_INDEX = 2,
+    DEMO_REPLACE_LENGTH = 2,
+    DEMO_INSERT_INDEX = 4,
+    DEMO_REMOVE_INDEX = 0,
+    DEMO_REMOVE_LENGTH = 2,
+    DEMO_SLICE_OFFSET = 6,
+    DEMO_SLICE_LENGTH = 5,
+    DEMO_SPLIT_CAPACITY = 8,
+    DEMO_EMBEDDED_FIRST_INDEX = 0,
+    DEMO_EMBEDDED_SECOND_INDEX = 1,
+    DEMO_EMBEDDED_THIRD_INDEX = 2,
+    DEMO_EMBEDDED_BYTES = DEMO_EMBEDDED_THIRD_INDEX + 1,
+    DEMO_RESERVE_CONTENT_BYTES = 64,
+    DEMO_NUMBER_BUFFER_BYTES = 32,
+    DEMO_SEPARATOR = ','
 };
 
 #define DEMO_HELLO "hello"
 #define DEMO_WORLD "world"
-#define DEMO_GREETING_FMT ", %s"
-#define DEMO_EDIT_START "abcdef"
-#define DEMO_REPLACEMENT "XY"
-#define DEMO_BANG "!"
-#define DEMO_HAY "one fish two fish"
+#define DEMO_GREETING_FORMAT ", %s"
+#define DEMO_EDIT_SOURCE "abcdef"
+#define DEMO_REPLACEMENT_TEXT "XY"
+#define DEMO_EXCLAMATION "!"
+#define DEMO_HAYSTACK "one fish two fish"
 #define DEMO_NEEDLE "fish"
 #define DEMO_MISSING "shark"
-#define DEMO_PADDED "  hello world  "
-#define DEMO_SPLIT_SRC "red,green,,blue"
-#define DEMO_OWNED "owned"
-#define DEMO_KEEP "keep"
-#define DEMO_SHORT "hi"
+#define DEMO_PADDED_TEXT "  hello world  "
+#define DEMO_SPLIT_SOURCE "red,green,,blue"
+#define DEMO_OWNED_TEXT "owned"
+#define DEMO_PRESERVED_TEXT "keep"
+#define DEMO_SHORT_TEXT "hi"
 #define DEMO_EMPTY_MARK "(empty)"
 #define DEMO_YES "yes"
 #define DEMO_NO "no"
 #define DEMO_NPOS_NAME "STR_NPOS"
+#define DEMO_LENGTH_KEY "len"
+#define DEMO_SOURCE_KEY "src"
+#define DEMO_STICKY_KEY "sticky"
 
-/* Propagates any non-OK status. Permitted only in functions that acquire nothing. */
-#define DEMO_TRY(expr)                                                                             \
-    do {                                                                                           \
-        str_status_t demo_try_s_ = (expr);                                                         \
-        if (demo_try_s_ != STR_OK)                                                                 \
-            return demo_try_s_;                                                                    \
-    } while (0)
+typedef enum { DEMO_MATCH_FIRST, DEMO_MATCH_LAST } demo_match_mode_t;
 
-/* Maps status to a process exit code. Writes failures to stderr. */
-static int demo_exit(str_status_t status);
+/* key plus needle are borrowed non-NULL strings. */
+typedef struct {
+    const char *key;
+    const char *needle;
+    demo_match_mode_t mode;
+} demo_match_request_t;
 
-/* Runs every printable scene. */
+typedef str_status_t (*demo_scene_fn_t)(void);
+
+/* Writes non-OK status to stderr, then returns EXIT_FAILURE. */
+static int demo_report_failure(str_status_t status);
+
+/* Flushes standard output. Fails with STR_ERR_FMT. */
+static str_status_t demo_flush_output(void);
+
+/* Runs every printable scene. Propagates the first scene status. */
 static str_status_t demo_run(void);
 
-/* Prints an append-built greeting. */
+/* Prints an append-built greeting. Propagates library or presentation status. */
 static str_status_t demo_build(void);
 
-/* Prints in-place edit results. */
+/* Prints in-place edit results. Propagates library or presentation status. */
 static str_status_t demo_edit(void);
 
-/* Prints an overlap-safe self-append. */
+/* Prints an overlap-safe self-append. Propagates library or presentation status. */
 static str_status_t demo_overlap(void);
 
-/* Prints substring match indexes. */
+/* Prints substring match indexes. Propagates library or presentation status. */
 static str_status_t demo_search(void);
 
-/* Prints borrowed-view queries. */
+/* Prints borrowed-view queries. Propagates library or presentation status. */
 static str_status_t demo_views(void);
 
-/* Prints a comma-separated split. */
+/* Prints a comma-separated split. Propagates library or presentation status. */
 static str_status_t demo_split(void);
 
-/* Prints ownership transfer results. */
+/* Prints stored parts from non-NULL borrowed split_output. Propagates STR_ERR_FMT. */
+static str_status_t demo_print_split_parts(const str_split_out_t *split_output);
+
+/* Prints ownership transfer results. Propagates library or presentation status. */
 static str_status_t demo_ownership(void);
 
-/* Prints a deep copy of one string. */
+/* Prints a deep copy of one string. Propagates library or presentation status. */
 static str_status_t demo_copy(void);
 
-/* Prints a move that empties the source. */
+/* Prints a move that empties the source. Propagates library or presentation status. */
 static str_status_t demo_move(void);
 
-/* Prints a heap buffer detached for free(). */
+/* Prints a heap buffer detached for free(). Propagates library or presentation status. */
 static str_status_t demo_detach(void);
 
-/* Prints sticky-error recovery. */
+/* Prints sticky-error recovery. Propagates library or presentation status. */
 static str_status_t demo_sticky(void);
 
-/* Prints a payload that contains an embedded NUL. */
+/* Demonstrates sticky rejection on non-NULL initialized string. Propagates presentation status. */
+static str_status_t demo_demonstrate_sticky_failure(str_t *string);
+
+/* Prints a payload that contains an embedded NUL. Propagates library or presentation status. */
 static str_status_t demo_binary(void);
 
-/* Prints heap capacity changes. */
+/* Prints heap capacity changes. Propagates library or presentation status. */
 static str_status_t demo_capacity(void);
 
-/* Releases s. Returns status. */
-static str_status_t demo_release(str_t *s, str_status_t status);
+/* Releases non-NULL initialized string. Returns status unchanged. */
+static str_status_t demo_release(str_t *string, str_status_t status);
 
-/* Releases two initialized strings. Returns status. */
-static str_status_t demo_release_pair(str_t *a, str_t *b, str_status_t status);
+/* Releases non-NULL initialized first plus second. Returns status unchanged. */
+static str_status_t demo_release_pair(str_t *first, str_t *second, str_status_t status);
 
-/* Prints s under key, or s's sticky status. */
-static str_status_t demo_emit(str_t *s, const char *key);
+/* Releases caller-owned buffer through free(). NULL is accepted. */
+static void demo_release_buffer(char *buffer);
 
-/* Prints the first match index of needle. */
-static str_status_t demo_emit_find(const str_t *s, const char *key, const char *needle);
+/* Prints non-NULL borrowed string under non-NULL borrowed key. Propagates sticky or I/O status. */
+static str_status_t demo_print_string(const str_t *string, const char *key);
 
-/* Prints the last match index of needle. */
-static str_status_t demo_emit_rfind(const str_t *s, const char *key, const char *needle);
+/* Prints request's match in non-NULL borrowed string. Pointers in request must be non-NULL. */
+static str_status_t demo_print_match(const str_t *string, demo_match_request_t request);
 
-/* Writes a section heading to stdout. */
+/* Writes non-NULL borrowed title as a section heading. Fails with STR_ERR_FMT. */
 static str_status_t demo_print_section(const char *title);
 
-/* Writes a key/value line to stdout. */
-static str_status_t demo_print_kv(const char *key, const char *value);
+/* Writes borrowed non-NULL key plus value. Fails with STR_ERR_FMT. */
+static str_status_t demo_print_key_value(const char *key, const char *value);
 
-/* Writes a size_t value as a key/value line. */
+/* Writes value under non-NULL borrowed key. Fails with STR_ERR_FMT. */
 static str_status_t demo_print_size(const char *key, size_t value);
 
-/* Writes a search index, using STR_NPOS for a miss. */
-static str_status_t demo_print_idx(const char *key, size_t idx);
+/* Writes idx under non-NULL borrowed key, using STR_NPOS for a miss. Fails with STR_ERR_FMT. */
+static str_status_t demo_print_index(const char *key, size_t idx);
 
-/* Writes yes or no for a boolean. */
+/* Writes yes or no under non-NULL borrowed key. Fails with STR_ERR_FMT. */
 static str_status_t demo_print_bool(const char *key, bool value);
 
-/* Writes a status name. */
+/* Writes status name under non-NULL borrowed key. Fails with STR_ERR_FMT. */
 static str_status_t demo_print_status(const char *key, str_status_t status);
 
-/* Writes a borrowed span as a key/value line. */
+/* Writes valid borrowed view under non-NULL borrowed key. Fails with STR_ERR_FMT. */
 static str_status_t demo_print_span(const char *key, str_view_t view);
 
-/* Writes one split part. */
+/* Writes non-NULL borrowed key followed by a separator. Fails with STR_ERR_FMT. */
+static str_status_t demo_print_span_prefix(const char *key);
+
+/* Writes nonempty valid borrowed view bytes. Fails with STR_ERR_FMT. */
+static str_status_t demo_write_view_bytes(str_view_t view);
+
+/* Writes one newline. Fails with STR_ERR_FMT. */
+static str_status_t demo_print_newline(void);
+
+/* Writes one valid borrowed split part. Fails with STR_ERR_FMT. */
 static str_status_t demo_print_part(size_t idx, str_view_t part);
 
-/* Writes DEMO_EMBEDDED_LEN bytes as hex. */
-static str_status_t demo_print_embedded_hex(const char *key, const char *bytes);
+/* Writes value as decimal text into non-NULL out_buffer. Fails with STR_ERR_FMT. */
+static str_status_t demo_format_size_value(char *out_buffer, size_t capacity, size_t value);
+
+/* Writes a part key into non-NULL out_buffer. Fails with STR_ERR_FMT. */
+static str_status_t demo_format_part_key(char *out_buffer, size_t capacity, size_t idx);
+
+/* Writes the first DEMO_EMBEDDED_BYTES of valid borrowed view as hex. Fails with STR_ERR_FMT. */
+static str_status_t demo_print_embedded_hex(const char *key, str_view_t view);
 
 int main(void)
 {
-    return demo_exit(demo_run());
+    str_status_t status = demo_run();
+    str_status_t flush_status = demo_flush_output();
+    if (status == STR_OK) {
+        status = flush_status;
+    }
+    if (status == STR_OK) {
+        return EXIT_SUCCESS;
+    }
+    return demo_report_failure(status);
 }
 
-static int demo_exit(str_status_t status)
+static int demo_report_failure(str_status_t status)
 {
-    if (status == STR_OK)
-        return 0;
+    assert(status != STR_OK);
 
-    int wrote = fprintf(stderr, "%s\n", str_status_name(status));
-    if (wrote < 0)
-        return 1;
-    return 1;
+    /* The format is fixed and the result is checked. */
+    /* NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
+    int written = fprintf(stderr, "%s\n", str_status_name(status));
+    if (written < 0) {
+        return EXIT_FAILURE;
+    }
+    return EXIT_FAILURE;
+}
+
+static str_status_t demo_flush_output(void)
+{
+    if (fflush(stdout) == EOF) {
+        return STR_ERR_FMT;
+    }
+    return STR_OK;
 }
 
 static str_status_t demo_run(void)
 {
-    DEMO_TRY(demo_build());
-    DEMO_TRY(demo_edit());
-    DEMO_TRY(demo_overlap());
-    DEMO_TRY(demo_search());
-    DEMO_TRY(demo_views());
-    DEMO_TRY(demo_split());
-    DEMO_TRY(demo_ownership());
-    DEMO_TRY(demo_sticky());
-    DEMO_TRY(demo_binary());
-    DEMO_TRY(demo_capacity());
+    static const demo_scene_fn_t demo_scenes[] = {
+        demo_build, demo_edit,      demo_overlap, demo_search, demo_views,
+        demo_split, demo_ownership, demo_sticky,  demo_binary, demo_capacity,
+    };
+    size_t scene_count = sizeof(demo_scenes) / sizeof(demo_scenes[0]);
+
+    for (size_t idx = 0; idx < scene_count; idx++) {
+        str_status_t status = demo_scenes[idx]();
+        if (status != STR_OK) {
+            return status;
+        }
+    }
     return STR_OK;
 }
 
 static str_status_t demo_build(void)
 {
-    str_t msg = STR_EMPTY;
+    str_t message = STR_EMPTY;
     str_status_t status = demo_print_section("build");
 
-    if (status != STR_OK)
-        return demo_release(&msg, status);
+    if (status != STR_OK) {
+        return demo_release(&message, status);
+    }
 
-    str_append(&msg, DEMO_HELLO);
-    str_append_fmt(&msg, DEMO_GREETING_FMT, DEMO_WORLD);
-    status = demo_emit(&msg, "text");
-    if (status != STR_OK)
-        return demo_release(&msg, status);
+    status = str_append(&message, DEMO_HELLO);
+    if (status != STR_OK) {
+        return demo_release(&message, status);
+    }
+    status = str_append_fmt(&message, DEMO_GREETING_FORMAT, DEMO_WORLD);
+    if (status != STR_OK) {
+        return demo_release(&message, status);
+    }
+    status = demo_print_string(&message, "text");
+    if (status != STR_OK) {
+        return demo_release(&message, status);
+    }
 
-    status = demo_print_size("len", str_len(&msg));
-    return demo_release(&msg, status);
+    status = demo_print_size(DEMO_LENGTH_KEY, str_len(&message));
+    return demo_release(&message, status);
 }
 
 static str_status_t demo_edit(void)
 {
-    str_t s = STR_EMPTY;
+    str_t string = STR_EMPTY;
     str_status_t status = demo_print_section("edit");
 
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_set(&s, DEMO_EDIT_START);
-    status = demo_emit(&s, "start");
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    status = str_set(&string, DEMO_EDIT_SOURCE);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_string(&string, "start");
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_replace_view(&s, DEMO_REPLACE_IDX, DEMO_REPLACE_LEN, str_view_from_cstr(DEMO_REPLACEMENT));
-    status = demo_emit(&s, "replaced");
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    status = str_replace_view(&string, DEMO_REPLACE_INDEX, DEMO_REPLACE_LENGTH,
+                              str_view_from_cstr(DEMO_REPLACEMENT_TEXT));
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_string(&string, "replaced");
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_insert_n(&s, DEMO_INSERT_IDX, DEMO_BANG, sizeof(DEMO_BANG) - 1);
-    status = demo_emit(&s, "inserted");
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    status =
+        str_insert_n(&string, DEMO_INSERT_INDEX, DEMO_EXCLAMATION, sizeof(DEMO_EXCLAMATION) - 1);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_string(&string, "inserted");
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_remove(&s, DEMO_REMOVE_IDX, DEMO_REMOVE_LEN);
-    status = demo_emit(&s, "removed");
-    return demo_release(&s, status);
+    status = str_remove(&string, DEMO_REMOVE_INDEX, DEMO_REMOVE_LENGTH);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_string(&string, "removed");
+    return demo_release(&string, status);
 }
 
 static str_status_t demo_overlap(void)
 {
-    str_t s = STR_EMPTY;
+    str_t string = STR_EMPTY;
     str_status_t status = demo_print_section("overlap");
 
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_set(&s, DEMO_HELLO);
-    status = demo_emit(&s, "base");
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    status = str_set(&string, DEMO_HELLO);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_string(&string, "base");
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_append_n(&s, str_cstr(&s), str_len(&s));
-    status = demo_emit(&s, "self-append");
-    return demo_release(&s, status);
+    status = str_append_n(&string, str_cstr(&string), str_len(&string));
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_string(&string, "self-append");
+    return demo_release(&string, status);
 }
 
 static str_status_t demo_search(void)
 {
-    str_t s = STR_EMPTY;
+    str_t string = STR_EMPTY;
     str_status_t status = demo_print_section("search");
 
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_set(&s, DEMO_HAY);
-    status = demo_emit(&s, "hay");
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    status = str_set(&string, DEMO_HAYSTACK);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_string(&string, "hay");
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    status = demo_emit_find(&s, "first", DEMO_NEEDLE);
-    if (status != STR_OK)
-        return demo_release(&s, status);
-    status = demo_emit_rfind(&s, "last", DEMO_NEEDLE);
-    if (status != STR_OK)
-        return demo_release(&s, status);
-    status = demo_emit_find(&s, "missing", DEMO_MISSING);
-    return demo_release(&s, status);
+    status = demo_print_match(&string, (demo_match_request_t){
+                                           .key = "first",
+                                           .needle = DEMO_NEEDLE,
+                                           .mode = DEMO_MATCH_FIRST,
+                                       });
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_match(&string, (demo_match_request_t){
+                                           .key = "last",
+                                           .needle = DEMO_NEEDLE,
+                                           .mode = DEMO_MATCH_LAST,
+                                       });
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_match(&string, (demo_match_request_t){
+                                           .key = "missing",
+                                           .needle = DEMO_MISSING,
+                                           .mode = DEMO_MATCH_FIRST,
+                                       });
+    return demo_release(&string, status);
 }
 
 static str_status_t demo_views(void)
 {
-    str_t s = STR_EMPTY;
+    str_t string = STR_EMPTY;
     str_status_t status = demo_print_section("views");
 
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    status = demo_print_kv("raw", DEMO_PADDED);
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    status = demo_print_key_value("raw", DEMO_PADDED_TEXT);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_set_view(&s, str_view_trim(str_view_from_cstr(DEMO_PADDED)));
-    status = demo_emit(&s, "trim");
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    status = str_set_view(&string, str_view_trim(str_view_from_cstr(DEMO_PADDED_TEXT)));
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_string(&string, "trim");
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_view_t slice = {0};
-    status = str_slice(&s, &slice, DEMO_SLICE_OFF, DEMO_SLICE_LEN);
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    str_view_t slice = {.ptr = NULL, .len = 0};
+    status = str_slice(&string, &slice, DEMO_SLICE_OFFSET, DEMO_SLICE_LENGTH);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
     status = demo_print_span("slice", slice);
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    status = demo_print_bool("starts_with hello", str_starts_with(&s, DEMO_HELLO));
-    if (status != STR_OK)
-        return demo_release(&s, status);
-    status = demo_print_bool("ends_with world", str_ends_with(&s, DEMO_WORLD));
-    return demo_release(&s, status);
+    status = demo_print_bool("starts_with hello", str_starts_with(&string, DEMO_HELLO));
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_bool("ends_with world", str_ends_with(&string, DEMO_WORLD));
+    return demo_release(&string, status);
 }
 
 static str_status_t demo_split(void)
 {
-    str_view_t parts[DEMO_SPLIT_CAP];
-    str_split_out_t out = {.parts = parts, .cap = DEMO_SPLIT_CAP, .count = 0};
-    str_view_t src = str_view_from_cstr(DEMO_SPLIT_SRC);
+    str_view_t parts[DEMO_SPLIT_CAPACITY] = {0};
+    str_split_out_t split_output = {
+        .parts = parts,
+        .cap = DEMO_SPLIT_CAPACITY,
+        .count = 0,
+    };
+    str_view_t source = str_view_from_cstr(DEMO_SPLIT_SOURCE);
 
-    DEMO_TRY(demo_print_section("split"));
-    DEMO_TRY(demo_print_kv("src", DEMO_SPLIT_SRC));
-    DEMO_TRY(str_split_view(src, &out, (char)DEMO_SEP));
-    DEMO_TRY(demo_print_size("count", out.count));
+    str_status_t status = demo_print_section("split");
+    if (status != STR_OK) {
+        return status;
+    }
+    status = demo_print_key_value(DEMO_SOURCE_KEY, DEMO_SPLIT_SOURCE);
+    if (status != STR_OK) {
+        return status;
+    }
+    status = str_split_view(source, &split_output, (char)DEMO_SEPARATOR);
+    if (status != STR_OK) {
+        return status;
+    }
+    status = demo_print_size("count", split_output.count);
+    if (status != STR_OK) {
+        return status;
+    }
+    return demo_print_split_parts(&split_output);
+}
 
-    for (size_t idx = 0; idx < (size_t)DEMO_SPLIT_CAP; idx++) {
-        if (idx >= out.count)
-            break;
-        DEMO_TRY(demo_print_part(idx, parts[idx]));
+static str_status_t demo_print_split_parts(const str_split_out_t *split_output)
+{
+    assert(split_output != NULL);
+    assert(split_output->cap == 0 || split_output->parts != NULL);
+
+    size_t stored_count = split_output->count;
+    if (stored_count > split_output->cap) {
+        stored_count = split_output->cap;
+    }
+    for (size_t idx = 0; idx < stored_count; idx++) {
+        str_status_t status = demo_print_part(idx, split_output->parts[idx]);
+        if (status != STR_OK) {
+            return status;
+        }
     }
     return STR_OK;
 }
 
 static str_status_t demo_ownership(void)
 {
-    DEMO_TRY(demo_print_section("ownership"));
-    DEMO_TRY(demo_copy());
-    DEMO_TRY(demo_move());
-    DEMO_TRY(demo_detach());
+    static const demo_scene_fn_t demo_ownership_scenes[] = {
+        demo_copy,
+        demo_move,
+        demo_detach,
+    };
+    str_status_t status = demo_print_section("ownership");
+    if (status != STR_OK) {
+        return status;
+    }
+
+    size_t scene_count = sizeof(demo_ownership_scenes) / sizeof(demo_ownership_scenes[0]);
+    for (size_t idx = 0; idx < scene_count; idx++) {
+        status = demo_ownership_scenes[idx]();
+        if (status != STR_OK) {
+            return status;
+        }
+    }
     return STR_OK;
 }
 
 static str_status_t demo_copy(void)
 {
-    str_t src = STR_EMPTY;
-    str_t dst = STR_EMPTY;
+    str_t source = STR_EMPTY;
+    str_t destination = STR_EMPTY;
 
-    str_set(&src, DEMO_OWNED);
-    if (str_failed(&src))
-        return demo_release_pair(&src, &dst, str_status(&src));
+    str_status_t status = str_set(&source, DEMO_OWNED_TEXT);
+    if (status != STR_OK) {
+        return demo_release_pair(&source, &destination, status);
+    }
 
-    str_status_t status = str_copy(&dst, &src);
-    if (status != STR_OK)
-        return demo_release_pair(&src, &dst, status);
+    status = str_copy(&destination, &source);
+    if (status != STR_OK) {
+        return demo_release_pair(&source, &destination, status);
+    }
 
-    status = demo_emit(&src, "src");
-    if (status != STR_OK)
-        return demo_release_pair(&src, &dst, status);
-    status = demo_emit(&dst, "copy");
-    if (status != STR_OK)
-        return demo_release_pair(&src, &dst, status);
+    status = demo_print_string(&source, DEMO_SOURCE_KEY);
+    if (status != STR_OK) {
+        return demo_release_pair(&source, &destination, status);
+    }
+    status = demo_print_string(&destination, "copy");
+    if (status != STR_OK) {
+        return demo_release_pair(&source, &destination, status);
+    }
 
-    status = demo_print_bool("equals", str_equals(&src, &dst));
-    return demo_release_pair(&src, &dst, status);
+    status = demo_print_bool("equals", str_equals(&source, &destination));
+    return demo_release_pair(&source, &destination, status);
 }
 
 static str_status_t demo_move(void)
 {
-    str_t src = STR_EMPTY;
-    str_t dst = STR_EMPTY;
+    str_t source = STR_EMPTY;
+    str_t destination = STR_EMPTY;
 
-    str_set(&src, DEMO_OWNED);
-    if (str_failed(&src))
-        return demo_release_pair(&src, &dst, str_status(&src));
+    str_status_t status = str_set(&source, DEMO_OWNED_TEXT);
+    if (status != STR_OK) {
+        return demo_release_pair(&source, &destination, status);
+    }
 
-    str_move(&dst, &src);
+    str_move(&destination, &source);
 
-    str_status_t status = demo_emit(&dst, "moved");
-    if (status != STR_OK)
-        return demo_release_pair(&src, &dst, status);
-    status = demo_emit(&src, "src after move");
-    return demo_release_pair(&src, &dst, status);
+    status = demo_print_string(&destination, "moved");
+    if (status != STR_OK) {
+        return demo_release_pair(&source, &destination, status);
+    }
+    status = demo_print_string(&source, "src after move");
+    return demo_release_pair(&source, &destination, status);
 }
 
 static str_status_t demo_detach(void)
 {
-    str_t s = STR_EMPTY;
+    str_t string = STR_EMPTY;
 
-    str_set(&s, DEMO_OWNED);
-    if (str_failed(&s))
-        return demo_release(&s, str_status(&s));
+    str_status_t status = str_set(&string, DEMO_OWNED_TEXT);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    char *owned = str_detach(&s);
-    if (owned == NULL)
-        return demo_release(&s, str_status(&s));
+    char *owned_buffer = str_detach(&string);
+    if (owned_buffer == NULL) {
+        return demo_release(&string, str_status(&string));
+    }
 
-    str_deinit(&s);
-    str_status_t status = demo_print_kv("detached", owned);
-    free(owned);
-    return status;
+    status = demo_print_key_value("detached", owned_buffer);
+    demo_release_buffer(owned_buffer);
+    return demo_release(&string, status);
 }
 
 static str_status_t demo_sticky(void)
 {
-    str_t s = STR_EMPTY;
-    str_status_t status = demo_print_section("sticky");
+    str_t string = STR_EMPTY;
+    str_status_t status = demo_print_section(DEMO_STICKY_KEY);
 
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_set(&s, DEMO_KEEP);
-    status = demo_emit(&s, "content");
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    status = str_set(&string, DEMO_PRESERVED_TEXT);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_string(&string, "content");
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_status_t removed = str_remove(&s, str_len(&s), 1);
-    status = demo_print_status("bad remove", removed);
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    status = demo_demonstrate_sticky_failure(&string);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_append(&s, DEMO_BANG);
-    status = demo_print_kv("blocked append", str_cstr(&s));
-    if (status != STR_OK)
-        return demo_release(&s, status);
-    status = demo_print_status("sticky", str_status(&s));
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    str_clear_error(&string);
+    status = str_append(&string, DEMO_EXCLAMATION);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_string(&string, "after clear_error");
+    return demo_release(&string, status);
+}
 
-    str_clear_error(&s);
-    str_append(&s, DEMO_BANG);
-    status = demo_emit(&s, "after clear_error");
-    return demo_release(&s, status);
+static str_status_t demo_demonstrate_sticky_failure(str_t *string)
+{
+    assert(string != NULL);
+    assert(str_ok(string));
+
+    str_status_t remove_status = str_remove(string, str_len(string), 1);
+    if (remove_status == STR_OK) {
+        return STR_ERR_FMT;
+    }
+    if (remove_status != STR_ERR_RANGE) {
+        return remove_status;
+    }
+    str_status_t status = demo_print_status("bad remove", remove_status);
+    if (status != STR_OK) {
+        return status;
+    }
+
+    str_status_t blocked_status = str_append(string, DEMO_EXCLAMATION);
+    if (blocked_status == STR_OK) {
+        return STR_ERR_FMT;
+    }
+    if (blocked_status != remove_status) {
+        return blocked_status;
+    }
+    status = demo_print_key_value("blocked append", str_cstr(string));
+    if (status != STR_OK) {
+        return status;
+    }
+    status = demo_print_status(DEMO_STICKY_KEY, str_status(string));
+    assert(str_status(string) == remove_status);
+    return status;
 }
 
 static str_status_t demo_binary(void)
 {
-    const char raw[DEMO_EMBEDDED_LEN] = {'a', '\0', 'b'};
-    str_t s = STR_EMPTY;
+    const char raw[DEMO_EMBEDDED_BYTES] = {'a', '\0', 'b'};
+    str_t string = STR_EMPTY;
     str_status_t status = demo_print_section("binary");
 
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_set_n(&s, raw, (size_t)DEMO_EMBEDDED_LEN);
-    if (str_failed(&s))
-        return demo_release(&s, str_status(&s));
+    status = str_set_n(&string, raw, (size_t)DEMO_EMBEDDED_BYTES);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    status = demo_print_size("len", str_len(&s));
-    if (status != STR_OK)
-        return demo_release(&s, status);
-    status = demo_print_embedded_hex("hex", str_cstr(&s));
-    if (status != STR_OK)
-        return demo_release(&s, status);
-    status = demo_print_kv("cstr", str_cstr(&s));
-    return demo_release(&s, status);
+    status = demo_print_size(DEMO_LENGTH_KEY, str_len(&string));
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_embedded_hex("hex", str_view(&string));
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_key_value("cstr", str_cstr(&string));
+    return demo_release(&string, status);
 }
 
 static str_status_t demo_capacity(void)
 {
-    str_t s = STR_EMPTY;
+    str_t string = STR_EMPTY;
     str_status_t status = demo_print_section("capacity");
 
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    status = demo_print_size("requested", (size_t)DEMO_RESERVE_LEN);
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    status = demo_print_size("requested", (size_t)DEMO_RESERVE_CONTENT_BYTES);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_reserve(&s, (size_t)DEMO_RESERVE_LEN);
-    if (str_failed(&s))
-        return demo_release(&s, str_status(&s));
-    status = demo_print_size("reserved", str_capacity(&s));
-    if (status != STR_OK)
-        return demo_release(&s, status);
+    status = str_reserve(&string, (size_t)DEMO_RESERVE_CONTENT_BYTES);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_size("reserved", str_capacity(&string));
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
 
-    str_set(&s, DEMO_SHORT);
-    str_shrink_to_fit(&s);
-    if (str_failed(&s))
-        return demo_release(&s, str_status(&s));
-    status = demo_print_size("after shrink", str_capacity(&s));
-    return demo_release(&s, status);
+    status = str_set(&string, DEMO_SHORT_TEXT);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = str_shrink_to_fit(&string);
+    if (status != STR_OK) {
+        return demo_release(&string, status);
+    }
+    status = demo_print_size("after shrink", str_capacity(&string));
+    return demo_release(&string, status);
 }
 
-static str_status_t demo_release(str_t *s, str_status_t status)
+static str_status_t demo_release(str_t *string, str_status_t status)
 {
-    assert(s != NULL);
-    str_deinit(s);
+    assert(string != NULL);
+    str_deinit(string);
+    assert(string->buf == NULL);
+    assert(string->len == 0);
     return status;
 }
 
-static str_status_t demo_release_pair(str_t *a, str_t *b, str_status_t status)
+static str_status_t demo_release_pair(str_t *first, str_t *second, str_status_t status)
 {
-    assert(a != NULL);
-    assert(b != NULL);
-    str_deinit(a);
-    str_deinit(b);
+    assert(first != NULL);
+    assert(second != NULL);
+    str_deinit(first);
+    str_deinit(second);
+    assert(first->buf == NULL);
+    assert(second->buf == NULL);
     return status;
 }
 
-static str_status_t demo_emit(str_t *s, const char *key)
+static void demo_release_buffer(char *buffer)
 {
-    assert(s != NULL);
+    free(buffer);
+}
+
+static str_status_t demo_print_string(const str_t *string, const char *key)
+{
+    assert(string != NULL);
     assert(key != NULL);
-    if (str_failed(s))
-        return str_status(s);
-    if (str_is_empty(s))
-        return demo_print_kv(key, DEMO_EMPTY_MARK);
-    return demo_print_kv(key, str_cstr(s));
+    if (str_failed(string)) {
+        return str_status(string);
+    }
+    if (str_is_empty(string)) {
+        return demo_print_key_value(key, DEMO_EMPTY_MARK);
+    }
+    return demo_print_key_value(key, str_cstr(string));
 }
 
-static str_status_t demo_emit_find(const str_t *s, const char *key, const char *needle)
+static str_status_t demo_print_match(const str_t *string, demo_match_request_t request)
 {
+    assert(string != NULL);
+    assert(request.key != NULL);
+    assert(request.needle != NULL);
+    assert(request.mode == DEMO_MATCH_FIRST || request.mode == DEMO_MATCH_LAST);
+
     size_t idx = STR_NPOS;
-    str_status_t status = str_find(s, &idx, needle);
+    str_status_t status = STR_OK;
+    if (request.mode == DEMO_MATCH_FIRST) {
+        status = str_find(string, &idx, request.needle);
+    } else {
+        status = str_view_rfind(str_view(string), &idx, str_view_from_cstr(request.needle));
+    }
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
-    return demo_print_idx(key, idx);
-}
-
-static str_status_t demo_emit_rfind(const str_t *s, const char *key, const char *needle)
-{
-    size_t idx = STR_NPOS;
-    str_status_t status = str_view_rfind(str_view(s), &idx, str_view_from_cstr(needle));
-
-    if (status != STR_OK)
-        return status;
-    return demo_print_idx(key, idx);
+    }
+    return demo_print_index(request.key, idx);
 }
 
 /*
- * Deviation: stdout write failures reuse STR_ERR_FMT.
- * The demo has no I/O status of its own.
+ * Presentation and demo-invariant failures reuse STR_ERR_FMT.
+ * The demo has no separate status module.
  */
 static str_status_t demo_print_section(const char *title)
 {
     assert(title != NULL);
 
-    int wrote = printf("\n== %s\n", title);
-    if (wrote < 0)
+    int written = printf("\n== %s\n", title);
+    if (written < 0) {
         return STR_ERR_FMT;
+    }
     return STR_OK;
 }
 
-static str_status_t demo_print_kv(const char *key, const char *value)
+static str_status_t demo_print_key_value(const char *key, const char *value)
 {
     assert(key != NULL);
     assert(value != NULL);
 
-    int wrote = printf("%s: %s\n", key, value);
-    if (wrote < 0)
+    int written = printf("%s: %s\n", key, value);
+    if (written < 0) {
         return STR_ERR_FMT;
+    }
     return STR_OK;
 }
 
 static str_status_t demo_print_size(const char *key, size_t value)
 {
-    char buf[DEMO_NUM_BUF_LEN];
-
     assert(key != NULL);
 
-    int n = snprintf(buf, sizeof(buf), "%zu", value);
-    if (n < 0 || n >= (int)DEMO_NUM_BUF_LEN)
-        return STR_ERR_FMT;
-    return demo_print_kv(key, buf);
+    char number_buffer[DEMO_NUMBER_BUFFER_BYTES] = {0};
+    str_status_t status = demo_format_size_value(number_buffer, sizeof(number_buffer), value);
+    if (status != STR_OK) {
+        return status;
+    }
+    return demo_print_key_value(key, number_buffer);
 }
 
-static str_status_t demo_print_idx(const char *key, size_t idx)
+static str_status_t demo_print_index(const char *key, size_t idx)
 {
-    if (idx == STR_NPOS)
-        return demo_print_kv(key, DEMO_NPOS_NAME);
+    assert(key != NULL);
+    if (idx == STR_NPOS) {
+        return demo_print_key_value(key, DEMO_NPOS_NAME);
+    }
     return demo_print_size(key, idx);
 }
 
 static str_status_t demo_print_bool(const char *key, bool value)
 {
-    return demo_print_kv(key, value ? DEMO_YES : DEMO_NO);
+    assert(key != NULL);
+    return demo_print_key_value(key, value ? DEMO_YES : DEMO_NO);
 }
 
 static str_status_t demo_print_status(const char *key, str_status_t status)
 {
-    return demo_print_kv(key, str_status_name(status));
+    assert(key != NULL);
+    return demo_print_key_value(key, str_status_name(status));
 }
 
 static str_status_t demo_print_span(const char *key, str_view_t view)
 {
     assert(key != NULL);
     assert(str_view_is_valid(view));
-    assert(view.len <= (size_t)DEMO_VIEW_PRINT_MAX);
-    if (view.len == 0)
-        return demo_print_kv(key, DEMO_EMPTY_MARK);
+    if (view.len == 0) {
+        return demo_print_key_value(key, DEMO_EMPTY_MARK);
+    }
 
-    int wrote = printf("%s: %.*s\n", key, (int)view.len, view.ptr);
-    if (wrote < 0)
+    str_status_t status = demo_print_span_prefix(key);
+    if (status != STR_OK) {
+        return status;
+    }
+    status = demo_write_view_bytes(view);
+    if (status != STR_OK) {
+        return status;
+    }
+    return demo_print_newline();
+}
+
+static str_status_t demo_print_span_prefix(const char *key)
+{
+    assert(key != NULL);
+
+    int written = printf("%s: ", key);
+    if (written < 0) {
         return STR_ERR_FMT;
+    }
+    return STR_OK;
+}
+
+static str_status_t demo_write_view_bytes(str_view_t view)
+{
+    assert(str_view_is_valid(view));
+    assert(view.ptr != NULL);
+    assert(view.len > 0);
+
+    size_t written = fwrite(view.ptr, sizeof(view.ptr[0]), view.len, stdout);
+    if (written != view.len) {
+        return STR_ERR_FMT;
+    }
+    return STR_OK;
+}
+
+static str_status_t demo_print_newline(void)
+{
+    int written = fputc('\n', stdout);
+    if (written == EOF) {
+        return STR_ERR_FMT;
+    }
     return STR_OK;
 }
 
 static str_status_t demo_print_part(size_t idx, str_view_t part)
 {
-    char key[DEMO_NUM_BUF_LEN];
-    int n = snprintf(key, sizeof(key), "part[%zu]", idx);
+    assert(str_view_is_valid(part));
 
-    if (n < 0 || n >= (int)DEMO_NUM_BUF_LEN)
-        return STR_ERR_FMT;
+    char key[DEMO_NUMBER_BUFFER_BYTES] = {0};
+    str_status_t status = demo_format_part_key(key, sizeof(key), idx);
+    if (status != STR_OK) {
+        return status;
+    }
     return demo_print_span(key, part);
 }
 
-static str_status_t demo_print_embedded_hex(const char *key, const char *bytes)
+static str_status_t demo_format_size_value(char *out_buffer, size_t capacity, size_t value)
 {
-    _Static_assert(DEMO_EMBEDDED_LEN == 3, "this printer writes three bytes");
-    assert(key != NULL);
-    assert(bytes != NULL);
+    assert(out_buffer != NULL);
+    assert(capacity > 0);
 
-    int wrote = printf("%s: %02x %02x %02x\n", key, (unsigned char)bytes[0],
-                       (unsigned char)bytes[1], (unsigned char)bytes[2]);
-    if (wrote < 0)
+    /* Output capacity is explicit and the result is checked. */
+    /* NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
+    int printed = snprintf(out_buffer, capacity, "%zu", value);
+    if (printed < 0) {
         return STR_ERR_FMT;
+    }
+    if ((size_t)printed >= capacity) {
+        return STR_ERR_FMT;
+    }
+    return STR_OK;
+}
+
+static str_status_t demo_format_part_key(char *out_buffer, size_t capacity, size_t idx)
+{
+    assert(out_buffer != NULL);
+    assert(capacity > 0);
+
+    /* Output capacity is explicit and the result is checked. */
+    /* NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
+    int printed = snprintf(out_buffer, capacity, "part[%zu]", idx);
+    if (printed < 0) {
+        return STR_ERR_FMT;
+    }
+    if ((size_t)printed >= capacity) {
+        return STR_ERR_FMT;
+    }
+    return STR_OK;
+}
+
+static str_status_t demo_print_embedded_hex(const char *key, str_view_t view)
+{
+    assert(key != NULL);
+    assert(str_view_is_valid(view));
+    assert(view.ptr != NULL);
+    assert(view.len >= (size_t)DEMO_EMBEDDED_BYTES);
+
+    int written = printf("%s: %02x %02x %02x\n", key,
+                         (unsigned int)(unsigned char)view.ptr[DEMO_EMBEDDED_FIRST_INDEX],
+                         (unsigned int)(unsigned char)view.ptr[DEMO_EMBEDDED_SECOND_INDEX],
+                         (unsigned int)(unsigned char)view.ptr[DEMO_EMBEDDED_THIRD_INDEX]);
+    if (written < 0) {
+        return STR_ERR_FMT;
+    }
     return STR_OK;
 }

@@ -1,9 +1,10 @@
 CC ?= cc
 CLANG_FORMAT ?= clang-format
-CPPFLAGS ?= -Iinclude
-CFLAGS ?= -std=c11 -pedantic-errors -Wall -Wextra -Werror -Wconversion -Wshadow \
+STR_CPPFLAGS = -Iinclude
+STR_CFLAGS = -std=c11 -pedantic-errors -Wall -Wextra -Werror -Wconversion -Wshadow \
 	-Wformat=2 -Wno-format-nonliteral -Wnull-dereference -Wstrict-prototypes \
 	-Wmissing-prototypes
+STR_COMPILE = $(CC) $(CPPFLAGS) $(STR_CPPFLAGS) $(CFLAGS) $(STR_CFLAGS)
 
 SRC = src/str.c
 TEST_SRC = tests/test_str.c
@@ -20,32 +21,33 @@ test: $(TEST_BIN)
 	./$(TEST_BIN)
 
 $(TEST_BIN): $(TEST_SRC) $(SRC) include/str.h Makefile
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DSTR_TEST -o $@ $(TEST_SRC) $(SRC)
+	$(STR_COMPILE) -DSTR_TEST $(LDFLAGS) -o $@ $(TEST_SRC) $(SRC) $(LDLIBS)
 
 asan: $(ASAN_BIN)
 	./$(ASAN_BIN)
 
 $(ASAN_BIN): $(TEST_SRC) $(SRC) include/str.h Makefile
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DSTR_TEST -O1 -g -fno-omit-frame-pointer \
-		-fsanitize=address,undefined -fno-sanitize-recover=all -o $@ $(TEST_SRC) $(SRC)
+	$(STR_COMPILE) -DSTR_TEST -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=address,undefined -fno-sanitize-recover=all $(LDFLAGS) \
+		-o $@ $(TEST_SRC) $(SRC) $(LDLIBS)
 
 release: $(RELEASE_BIN)
 	./$(RELEASE_BIN)
 
 $(RELEASE_BIN): $(TEST_SRC) $(SRC) include/str.h Makefile
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DSTR_TEST -O3 -DNDEBUG -D_FORTIFY_SOURCE=3 \
-		-o $@ $(TEST_SRC) $(SRC)
+	$(STR_COMPILE) -DSTR_TEST -O3 -DNDEBUG -D_FORTIFY_SOURCE=3 $(LDFLAGS) \
+		-o $@ $(TEST_SRC) $(SRC) $(LDLIBS)
 
 demo: $(DEMO_BIN)
 	./$(DEMO_BIN)
 
 $(DEMO_BIN): $(DEMO_SRC) $(SRC) include/str.h Makefile
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(DEMO_SRC) $(SRC)
+	$(STR_COMPILE) $(LDFLAGS) -o $@ $(DEMO_SRC) $(SRC) $(LDLIBS)
 
 format:
 	$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
 
-check: format test asan release
+check: format $(DEMO_BIN) test asan release
 
 clean:
 	rm -f $(TEST_BIN) $(ASAN_BIN) $(RELEASE_BIN) $(DEMO_BIN)

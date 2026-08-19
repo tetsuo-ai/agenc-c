@@ -4,36 +4,56 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
+/* Public operation results. Error values remain stable API. */
 typedef enum {
+    /* Operation completed successfully. */
     STR_OK = 0,
+    /* A pointer, object, view, or other argument is invalid. */
     STR_ERR_ARG = -1,
+    /* Dynamic allocation failed. */
     STR_ERR_ALLOC = -2,
+    /* A requested span lies outside current content. */
     STR_ERR_RANGE = -3,
+    /* A size calculation cannot be represented by size_t. */
     STR_ERR_OVERFLOW = -4,
+    /* Formatted output could not be produced consistently. */
     STR_ERR_FMT = -5
 } str_status_t;
 
 /*
- * Deviation: size_t cannot be an enum constant.
- * Missing-find sentinel, equal to SIZE_MAX.
+ * A size_t sentinel cannot be represented by a C enum.
+ * STR_NPOS is the standard maximum size and denotes a missing search result.
  */
-#define STR_NPOS ((size_t) - 1)
+#define STR_NPOS SIZE_MAX
 
 /*
- * Deviation: this guarded extension lets compilers check printf arguments.
- * It expands to nothing on compilers without GNU-style format attributes.
+ * This guarded extension lets supported compilers check printf arguments.
+ * Attribute suffix syntax cannot be replaced by a standard C declaration.
  */
 #if defined(__GNUC__) || defined(__clang__)
 #define STR_PRINTF_LIKE(format_index, first_arg)                                                   \
-    __attribute__((format(printf, format_index, first_arg)))
+    __attribute__((format(printf, (format_index), (first_arg))))
 #else
 #define STR_PRINTF_LIKE(format_index, first_arg)
 #endif
 
 /*
+ * Expansion occurs only after str_t is visible. The braces intentionally form an initializer:
+ * a compound literal would also permit the unsupported assignment of one str_t to another.
+ */
+#define STR_EMPTY                                                                                  \
+    {                                                                                              \
+        .buf = NULL, .len = 0, .cap = 0, .status = STR_OK                                          \
+    }
+
+/*
  * Owned growable byte string. len counts content bytes, including embedded NULs.
- * cap counts allocated bytes, including the trailing NUL. cap == 0 owns no heap memory.
+ * cap counts allocated bytes, including the trailing NUL.
+ * Invariants:
+ * - cap == 0 implies buf == NULL and len == 0.
+ * - cap > 0 implies buf != NULL, len < cap, and buf[len] == '\0'.
  *
  * Storage must be zero-initialized or passed to str_init exactly once before use.
  * Fields are caller-readable for stack allocation and diagnostics. Callers must not modify
@@ -61,7 +81,11 @@ typedef struct {
     size_t len;
 } str_view_t;
 
-/* Caller-owned storage for borrowed split views. count may exceed cap. */
+/*
+ * Caller-owned storage for borrowed split views.
+ * cap > 0 requires parts to designate cap writable elements. count is the full result size,
+ * so count may exceed cap when the caller-provided array truncates the stored results.
+ */
 typedef struct {
     str_view_t *parts;
     size_t cap;
@@ -69,209 +93,282 @@ typedef struct {
 } str_split_out_t;
 
 /*
- * Deviation: a compound initializer cannot be an enum.
- * Valid empty string. Equivalent to zero-initialization.
+ * Independent strings may be used concurrently. Access to a shared string, or to a view into it,
+ * requires external synchronization whenever any participant may mutate the owning string.
  */
-#define STR_EMPTY                                                                                  \
-    {                                                                                              \
-        .buf = NULL, .len = 0, .cap = 0, .status = STR_OK                                          \
-    }
 
-/* Deviation: never fails. Initializes previously uninitialized storage. NULL is a no-op. */
-void str_init(str_t *s);
+/* Initializes previously uninitialized caller-owned storage. NULL is a no-op. */
+void str_init(str_t *string);
 
-/* Deviation: never fails. Releases ownership. Safe on NULL or an already deinitialized object. */
-void str_deinit(str_t *s);
-
-/* Deviation: never fails. Empties content, retains capacity, then clears sticky status. */
-void str_clear(str_t *s);
-
-/* Deviation: never fails. Clears sticky status without changing content. NULL is a no-op. */
-void str_clear_error(str_t *s);
+/* Releases storage owned by string. NULL or already-deinitialized storage is accepted. */
+void str_deinit(str_t *string);
 
 /*
- * Deviation: never fails. Transfers ownership and sticky status from s to out.
- * Both objects must be initialized. NULL or identical arguments are a no-op.
+ * Restores initialized string to reusable empty state while retaining allocation.
+ * NULL is a no-op.
  */
-void str_move(str_t *out, str_t *s);
+void str_clear(str_t *string);
+
+/* Clears sticky status on initialized string without changing content. NULL is a no-op. */
+void str_clear_error(str_t *string);
 
 /*
- * Deep-copies the preserved bytes in s into initialized out. Source status is not copied.
- * A failed copy preserves out's bytes and records the failure on out.
+ * Releases destination's current allocation, then transfers ownership plus sticky status from
+ * initialized source. Source becomes empty. NULL or identical pointers are a no-op. Never fails.
  */
-str_status_t str_copy(str_t *out, const str_t *s);
+void str_move(str_t *destination, str_t *source);
 
 /*
- * Deviation: returns ownership directly. The caller releases the result with free().
- * Empty content still returns an allocated one-byte C string. Failure returns NULL.
+ * Deep-copies bytes from initialized source into initialized destination. A NULL destination
+ * returns STR_ERR_ARG. A NULL source records STR_ERR_ARG on a destination whose status is STR_OK.
+ * Source status is not copied. Identical pointers with STR_OK status are a successful no-op.
+ * Existing destination status propagates unchanged. STR_ERR_ALLOC or STR_ERR_OVERFLOW preserves
+ * destination content while recording the failure.
  */
-char *str_detach(str_t *s);
+str_status_t str_copy(str_t *destination, const str_t *source);
 
-/* Stable symbolic name for status. Unknown values return "STR_ERR_UNKNOWN". */
+/*
+ * Transfers string's owned allocation to the caller, then resets string to STR_EMPTY.
+ * The caller releases the returned C string with free(). Empty content returns allocated storage.
+ * NULL string returns NULL. STR_ERR_ALLOC returns NULL while recording the failure on string.
+ */
+char *str_detach(str_t *string);
+
+/*
+ * Returns a borrowed static status name. Unknown values map to "STR_ERR_UNKNOWN". Never fails.
+ */
 const char *str_status_name(str_status_t status);
 
-/* Replaces content with the C string src. NULL src records STR_ERR_ARG. */
-str_status_t str_set(str_t *s, const char *src);
-
 /*
- * Replaces content with len bytes at src. NULL src is valid only when len is zero.
- * A self-source may include the existing terminator, but never spare capacity.
+ * Unless stated otherwise, mutators require a non-NULL initialized string. A NULL string returns
+ * STR_ERR_ARG, with no object on which to record it. Existing sticky status propagates unchanged.
+ * A borrowed source may begin in existing content or at its terminator, but it must not extend
+ * into spare capacity.
+ * Mutators accepting borrowed pointers may perform work proportional to current allocation
+ * capacity to classify supported self-sources without nonportable pointer ordering.
  */
-str_status_t str_set_n(str_t *s, const char *src, size_t len);
-
-/* Replaces content with src. Invalid src records STR_ERR_ARG. */
-str_status_t str_set_view(str_t *s, str_view_t src);
-
-/* Appends the C string src. NULL src records STR_ERR_ARG. */
-str_status_t str_append(str_t *s, const char *src);
 
 /*
- * Appends len bytes at src. NULL src is valid only when len is zero.
- * A self-source may include the existing terminator, but never spare capacity.
+ * Replaces non-NULL initialized string from borrowed NUL-terminated source. Existing sticky status
+ * propagates. NULL source records STR_ERR_ARG. STR_ERR_ALLOC or STR_ERR_OVERFLOW is recorded.
  */
-str_status_t str_append_n(str_t *s, const char *src, size_t len);
-
-/* Appends src. Invalid src records STR_ERR_ARG. */
-str_status_t str_append_view(str_t *s, str_view_t src);
-
-/* Appends one byte, including NUL. */
-str_status_t str_append_char(str_t *s, char c);
+str_status_t str_set(str_t *string, const char *source);
 
 /*
- * Appends printf output from args. format must not be NULL.
- * Formatting is staged, so format plus read-only pointer arguments may borrow from s.
- * A format borrowed from s may begin in current content or at its existing terminator.
- * A %n destination must not overlap s.
+ * Replaces non-NULL initialized string from len borrowed bytes at source.
+ * NULL is valid for zero len.
+ * A self-source may include the existing terminator, never spare capacity. Existing sticky status
+ * propagates. STR_ERR_ARG, STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded on failure.
  */
-str_status_t str_append_vfmt(str_t *s, const char *format, va_list args) STR_PRINTF_LIKE(2, 0);
+str_status_t str_set_n(str_t *string, const char *source, size_t len);
 
 /*
- * Appends printf output. format must not be NULL.
+ * Replaces non-NULL initialized string from borrowed source. Existing sticky status propagates.
+ * STR_ERR_ARG, STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded on failure.
+ */
+str_status_t str_set_view(str_t *string, str_view_t source);
+
+/*
+ * Appends borrowed NUL-terminated source to non-NULL initialized string. Sticky status propagates.
+ * NULL source records STR_ERR_ARG. STR_ERR_ALLOC or STR_ERR_OVERFLOW is recorded.
+ */
+str_status_t str_append(str_t *string, const char *source);
+
+/*
+ * Appends len borrowed bytes at source to non-NULL initialized string. NULL is valid for zero len.
+ * A self-source may include the existing terminator, never spare capacity. Existing sticky status
+ * propagates. STR_ERR_ARG, STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded on failure.
+ */
+str_status_t str_append_n(str_t *string, const char *source, size_t len);
+
+/*
+ * Appends borrowed source to non-NULL initialized string. Existing sticky status propagates.
+ * STR_ERR_ARG, STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded on failure.
+ */
+str_status_t str_append_view(str_t *string, str_view_t source);
+
+/*
+ * Appends byte to non-NULL initialized string, including NUL.
+ * Existing sticky status propagates. STR_ERR_ALLOC or STR_ERR_OVERFLOW is recorded.
+ */
+str_status_t str_append_char(str_t *string, char byte);
+
+/*
+ * Appends printf output from borrowed arguments to non-NULL initialized string.
+ * The borrowed format must be non-NULL. The caller retains arguments. The caller remains
+ * responsible for va_end.
+ * Format plus read-only pointer arguments may borrow from string because output is staged.
+ * A borrowed format may begin in current content or at its terminator. A %n destination must not
+ * overlap string. Output beyond the internal stack buffer may evaluate the format twice, so a %n
+ * destination may receive the same write twice. A %n destination may be modified even if a later
+ * allocation or render failure is returned. STR_ERR_ARG, STR_ERR_FMT, STR_ERR_ALLOC, or
+ * STR_ERR_OVERFLOW is recorded. Existing sticky status propagates.
+ */
+str_status_t str_append_vfmt(str_t *string, const char *format, va_list arguments)
+    STR_PRINTF_LIKE(2, 0);
+
+/*
+ * Appends printf output to non-NULL initialized string. format must not be NULL.
  * Pass untrusted text through a conversion such as "%s", never as format.
- * Formatting has the same staging, borrowing, and %n rules as str_append_vfmt.
+ * Staging, borrowing, %n behavior, sticky propagation, plus failure statuses match str_append_vfmt.
  */
-str_status_t str_append_fmt(str_t *s, const char *format, ...) STR_PRINTF_LIKE(2, 3);
-
-/* Ensures at least len bytes of total content capacity. Never shrinks. */
-str_status_t str_reserve(str_t *s, size_t len);
-
-/* Reduces allocation to the minimum for current content. */
-str_status_t str_shrink_to_fit(str_t *s);
-
-/* Changes length to len. New bytes receive fill. */
-str_status_t str_resize(str_t *s, size_t len, char fill);
+str_status_t str_append_fmt(str_t *string, const char *format, ...) STR_PRINTF_LIKE(2, 3);
 
 /*
- * Inserts len bytes at idx. idx equal to current length appends.
- * Self-sources may include the existing terminator, but never spare capacity.
+ * Ensures non-NULL initialized string can hold len content bytes.
+ * Existing sticky status propagates.
+ * STR_ERR_ALLOC or STR_ERR_OVERFLOW is recorded on failure.
  */
-str_status_t str_insert_n(str_t *s, size_t idx, const char *src, size_t len);
+str_status_t str_reserve(str_t *string, size_t len);
 
-/* Inserts src at idx. Invalid src records STR_ERR_ARG. */
-str_status_t str_insert_view(str_t *s, size_t idx, str_view_t src);
+/*
+ * Minimizes non-NULL initialized string allocation.
+ * Existing sticky status propagates. STR_ERR_ALLOC or STR_ERR_OVERFLOW is recorded on failure.
+ */
+str_status_t str_shrink_to_fit(str_t *string);
 
-/* Removes len bytes at idx. A span outside content records STR_ERR_RANGE. */
-str_status_t str_remove(str_t *s, size_t idx, size_t len);
+/*
+ * Resizes non-NULL initialized string to len bytes using fill. Existing sticky status propagates.
+ * STR_ERR_ALLOC or STR_ERR_OVERFLOW is recorded on failure.
+ */
+str_status_t str_resize(str_t *string, size_t len, char fill);
 
-/* Atomically replaces remove_len bytes at idx. A replacement may borrow from s. */
-str_status_t str_replace_view(str_t *s, size_t idx, size_t remove_len, str_view_t replacement);
+/*
+ * Inserts len borrowed bytes from source at idx in non-NULL initialized string. End idx appends.
+ * NULL source is valid for zero len. A self-source may include the existing terminator,
+ * never spare capacity. STR_ERR_ARG, STR_ERR_RANGE, STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded.
+ */
+str_status_t str_insert_n(str_t *string, size_t idx, const char *source, size_t len);
+
+/*
+ * Inserts borrowed source at idx in non-NULL initialized string. Existing sticky status propagates.
+ * STR_ERR_ARG, STR_ERR_RANGE, STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded on failure.
+ */
+str_status_t str_insert_view(str_t *string, size_t idx, str_view_t source);
+
+/*
+ * Removes len bytes at idx from non-NULL initialized string. Existing sticky status propagates.
+ * An outside span records STR_ERR_RANGE.
+ */
+str_status_t str_remove(str_t *string, size_t idx, size_t len);
+
+/*
+ * Replaces remove_len bytes at idx in non-NULL initialized string from borrowed replacement.
+ * Replacement may borrow existing content through its terminator, never spare capacity. Failure
+ * is atomic. Existing sticky status propagates. STR_ERR_ARG, STR_ERR_RANGE, STR_ERR_ALLOC, or
+ * STR_ERR_OVERFLOW is recorded.
+ */
+str_status_t str_replace_view(str_t *string, size_t idx, size_t remove_len, str_view_t replacement);
 
 /*
  * Returns a NUL-terminated observation pointer. Never NULL.
- * Deviation: NULL s is observed as empty.
+ * The returned pointer is borrowed until string mutates. NULL string is observed as static empty.
  */
-const char *str_cstr(const str_t *s);
+const char *str_cstr(const str_t *string);
 
-/* Byte length. Deviation: NULL s has length zero. */
-size_t str_len(const str_t *s);
+/* Returns initialized string's byte length. NULL string has length zero. */
+size_t str_len(const str_t *string);
 
-/* Usable content capacity, excluding the terminator. Deviation: NULL returns zero. */
-size_t str_capacity(const str_t *s);
+/* Returns content-byte capacity, excluding the terminator. NULL string has capacity zero. */
+size_t str_capacity(const str_t *string);
 
-/* True when length is zero. Deviation: NULL s is empty. */
-bool str_is_empty(const str_t *s);
+/* True when initialized string has zero length. NULL string is empty. */
+bool str_is_empty(const str_t *string);
 
-/* Sticky status. NULL s is STR_ERR_ARG. */
-str_status_t str_status(const str_t *s);
+/* Returns initialized string's sticky status. NULL string returns STR_ERR_ARG. */
+str_status_t str_status(const str_t *string);
 
-/* True when s is non-NULL with status STR_OK. */
-bool str_ok(const str_t *s);
+/* True when initialized string is non-NULL with status STR_OK. */
+bool str_ok(const str_t *string);
 
 /*
- * Deviation: negated form of str_ok, kept as the established query pair.
- * True when s is NULL or its status is not STR_OK.
+ * True when string is NULL or its status is not STR_OK.
  */
-bool str_failed(const str_t *s);
+bool str_failed(const str_t *string);
 
 /*
- * Deviation: boolean observers return false for a NULL operand instead of a status.
- * The established query API treats a missing operand as non-equal / non-matching.
+ * Compares borrowed initialized strings by byte content. A missing operand is non-equal.
  */
-bool str_equals(const str_t *s, const str_t *other);
+bool str_equals(const str_t *string, const str_t *other);
 
-/* Byte equality with a C string. NULL on either side is false. */
-bool str_equals_cstr(const str_t *s, const char *other);
+/* Compares initialized string with borrowed NUL-terminated other. NULL on either side is false. */
+bool str_equals_cstr(const str_t *string, const char *other);
 
-/* True when s begins with prefix. NULL on either side is false. */
-bool str_starts_with(const str_t *s, const char *prefix);
+/* Empty prefix matches. NULL on either side is false. */
+bool str_starts_with(const str_t *string, const char *prefix);
 
-/* True when s ends with suffix. NULL on either side is false. */
-bool str_ends_with(const str_t *s, const char *suffix);
+/* Empty suffix matches. NULL on either side is false. */
+bool str_ends_with(const str_t *string, const char *suffix);
 
-/* Writes the first needle index or STR_NPOS. Empty needle matches at zero. */
-str_status_t str_find(const str_t *s, size_t *out_idx, const char *needle);
+/*
+ * Writes the first borrowed needle index in initialized string, or STR_NPOS. Empty needle matches
+ * at zero. NULL string, out_idx, or needle returns STR_ERR_ARG without changing out_idx.
+ */
+str_status_t str_find(const str_t *string, size_t *out_idx, const char *needle);
 
-/* Writes the first c index or STR_NPOS. */
-str_status_t str_find_char(const str_t *s, size_t *out_idx, char c);
+/*
+ * Writes the first byte index in initialized string, or STR_NPOS. NULL string or out_idx returns
+ * STR_ERR_ARG without changing out_idx.
+ */
+str_status_t str_find_char(const str_t *string, size_t *out_idx, char byte);
 
-/* Whole-string borrowed view. NULL s produces an empty view. */
-str_view_t str_view(const str_t *s);
+/* Returns a whole-string borrowed view. Mutation invalidates it. NULL string produces empty. */
+str_view_t str_view(const str_t *string);
 
-/* Writes a borrowed content span. A span outside content is STR_ERR_RANGE. */
-str_status_t str_slice(const str_t *s, str_view_t *out, size_t off, size_t len);
+/*
+ * Writes a borrowed len-byte view at offset in initialized string. NULL string or out_view returns
+ * STR_ERR_ARG. An outside span returns STR_ERR_RANGE. Failure leaves out_view unchanged.
+ */
+str_status_t str_slice(const str_t *string, str_view_t *out_view, size_t offset, size_t len);
 
-/* Borrowed view of a C string. NULL src produces an empty view. */
-str_view_t str_view_from_cstr(const char *src);
+/* Returns a view borrowing NUL-terminated source. NULL source produces an empty view. */
+str_view_t str_view_from_cstr(const char *source);
 
-/* Borrowed view of len bytes. NULL with nonzero len produces an invalid view. */
-str_view_t str_view_from_n(const char *src, size_t len);
+/* Returns a view borrowing len source bytes. NULL with nonzero len produces an invalid view. */
+str_view_t str_view_from_n(const char *source, size_t len);
 
 /* True when view has a non-NULL pointer or zero length; it cannot verify pointed-to storage. */
 bool str_view_is_valid(str_view_t view);
 
 /* Byte equality. Invalid views compare false. Two valid empty views compare equal. */
-bool str_view_equals(str_view_t a, str_view_t b);
+bool str_view_equals(str_view_t left, str_view_t right);
 
-/* Writes unsigned-byte lexical order as -1, 0, or 1. Invalid views are STR_ERR_ARG. */
-str_status_t str_view_compare(int *out_order, str_view_t a, str_view_t b);
+/*
+ * Writes unsigned-byte lexical order as -1, 0, or 1. Invalid borrowed views or NULL out_order
+ * returns STR_ERR_ARG without changing out_order.
+ */
+str_status_t str_view_compare(int *out_order, str_view_t left, str_view_t right);
 
-/* True when value begins with prefix. Invalid views return false. */
+/* Empty prefix matches. Invalid views return false. */
 bool str_view_starts_with(str_view_t value, str_view_t prefix);
 
-/* True when value ends with suffix. Invalid views return false. */
+/* Empty suffix matches. Invalid views return false. */
 bool str_view_ends_with(str_view_t value, str_view_t suffix);
 
 /*
- * Deviation: output follows hay to preserve the established str_view_find signature.
- * Writes the first needle index or STR_NPOS. Empty needle matches at zero.
+ * Writes the first needle index or STR_NPOS. Empty needle matches at zero. Invalid borrowed views
+ * or NULL out_idx returns STR_ERR_ARG without changing out_idx.
  */
-str_status_t str_view_find(str_view_t hay, size_t *out_idx, str_view_t needle);
+str_status_t str_view_find(str_view_t haystack, size_t *out_idx, str_view_t needle);
 
 /*
- * Deviation: output follows hay to mirror str_view_find.
- * Writes the last needle index or STR_NPOS. Empty needle matches at hay.len.
+ * Writes the last needle index or STR_NPOS. Empty needle matches at haystack.len. Invalid borrowed
+ * views or NULL out_idx returns STR_ERR_ARG without changing out_idx.
  */
-str_status_t str_view_rfind(str_view_t hay, size_t *out_idx, str_view_t needle);
+str_status_t str_view_rfind(str_view_t haystack, size_t *out_idx, str_view_t needle);
 
 /* Drops ASCII whitespace at both ends. Invalid input produces an empty view. */
 str_view_t str_view_trim(str_view_t view);
 
 /*
- * Splits src on separator into caller-owned out->parts storage.
- * out->count receives the full count. count greater than cap means truncation.
- * The parts array must not overlap src's bytes.
+ * Splits borrowed source on separator into caller-owned split_output storage. parts must not
+ * overlap source bytes. Leading, trailing, or consecutive separators produce empty parts. On
+ * success, count receives the full result size. Truncation stores the first min(count, cap) parts
+ * in source order. Invalid pointers or views return STR_ERR_ARG. Unrepresentable count returns
+ * STR_ERR_OVERFLOW. Empty source produces one empty part. A zero-capacity output with NULL parts is
+ * a valid count-only query. Failure leaves split_output unchanged.
  */
-str_status_t str_split_view(str_view_t src, str_split_out_t *out, char separator);
+str_status_t str_split_view(str_view_t source, str_split_out_t *split_output, char separator);
 
 #ifdef STR_TEST
 /* Test-only. Fails allocation attempts after success_count successful attempts. */

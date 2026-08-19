@@ -25,8 +25,9 @@ enum {
 #define STR_TRY(expr)                                                                              \
     do {                                                                                           \
         str_status_t str_try_status_ = (expr);                                                     \
-        if (str_try_status_ != STR_OK)                                                             \
+        if (str_try_status_ != STR_OK) {                                                           \
             return str_try_status_;                                                                \
+        }                                                                                          \
     } while (0)
 
 /* idx is meaningful only when is_inside is true. */
@@ -116,7 +117,7 @@ typedef struct {
 
 /* Keeps byte search mode adjacent to its byte so callers cannot swap scalar arguments. */
 typedef struct {
-    uint8_t byte;
+    unsigned char byte;
     str_search_mode_t mode;
 } str_byte_search_t;
 
@@ -302,10 +303,10 @@ static bool str_has_view_suffix(str_view_t value, str_view_t suffix);
 static void str_move_bytes(char *destination, const char *source, size_t len);
 
 /* Fills non-NULL destination with len copies of byte through memset. */
-static void str_fill_bytes(char *destination, size_t len, uint8_t byte);
+static void str_fill_bytes(char *destination, size_t len, unsigned char byte);
 
 /* Returns the unsigned byte at idx in a valid nonempty view. */
-static uint8_t str_read_view_byte(str_view_t view, size_t idx);
+static unsigned char str_read_view_byte(str_view_t view, size_t idx);
 
 /* Returns borrowed readable storage for valid view. Empty NULL view maps to static storage. */
 static const char *str_get_view_buffer(str_view_t view);
@@ -362,6 +363,10 @@ static str_status_t str_set_valid_span(str_t *string, const char *source, size_t
  * Records STR_ERR_ARG, STR_ERR_ALLOC, or STR_ERR_OVERFLOW. */
 static str_status_t str_append_valid_span(str_t *string, const char *source, size_t len);
 
+/* Appends a readable source known not to alias string.
+ * Records STR_ERR_ALLOC or STR_ERR_OVERFLOW. */
+static str_status_t str_append_unaliased_span(str_t *string, const char *source, size_t len);
+
 /* Writes the terminator for a non-NULL allocated string. */
 static void str_write_terminator(str_t *string);
 
@@ -370,9 +375,6 @@ static void str_replace_content(str_t *string, const char *source, size_t len);
 
 /* Appends a readable len-byte source to a non-NULL string with sufficient capacity. */
 static void str_append_content(str_t *string, const char *source, size_t len);
-
-/* Opens a len-byte gap at idx in a non-NULL string with sufficient capacity. */
-static void str_open_gap(str_t *string, size_t idx, size_t len);
 
 /* Returns overlap source offset after opening the request gap. */
 static size_t str_adjust_source_offset(str_overlap_t overlap, str_insert_request_t request);
@@ -465,11 +467,11 @@ static str_status_t str_find_view_match(size_t *out_idx, str_view_t haystack, st
 static size_t str_locate_view_match(str_view_t haystack, str_view_t needle, str_search_mode_t mode);
 
 /* True when left precedes right under the selected byte order. */
-static bool str_is_byte_before(uint8_t left, uint8_t right, bool is_reverse_order);
+static bool str_is_byte_before(unsigned char left, unsigned char right, bool is_reverse_order);
 
 /* Advances non-NULL walk for one compared byte pair. */
-static void str_suffix_walk_step(str_suffix_walk_t *walk, uint8_t candidate_byte,
-                                 uint8_t suffix_byte, bool is_reverse_order);
+static void str_suffix_walk_step(str_suffix_walk_t *walk, unsigned char candidate_byte,
+                                 unsigned char suffix_byte, bool is_reverse_order);
 
 /* Runs at most needle.len factorization steps. Returns true when non-NULL walk is complete. */
 static bool str_run_suffix_walk_pass(str_suffix_walk_t *walk, str_view_t needle,
@@ -521,10 +523,10 @@ static bool str_search_step(const str_search_context_t *context, str_search_stat
                             size_t *found);
 
 /* First index of byte, or STR_NPOS. */
-static size_t str_view_find_byte(str_view_t haystack, uint8_t byte);
+static size_t str_view_find_byte(str_view_t haystack, unsigned char byte);
 
 /* Last index of byte, or STR_NPOS. */
-static size_t str_view_rfind_byte(str_view_t haystack, uint8_t byte);
+static size_t str_view_rfind_byte(str_view_t haystack, unsigned char byte);
 
 /* Returns the requested byte occurrence from valid nonempty haystack. */
 static size_t str_search_view_byte(str_view_t haystack, str_byte_search_t search);
@@ -549,72 +551,81 @@ static void str_store_split_part(str_split_out_t *split_output, size_t count, co
 /* Returns the next separator index from cursor in valid source, or STR_NPOS. */
 static size_t str_find_separator(str_view_t source, str_split_cursor_t cursor);
 
-/* Writes split count to non-NULL out_count. Fails with STR_ERR_OVERFLOW. */
-static str_status_t str_count_split_parts(size_t *out_count, str_view_t source, char separator);
-
-/* Writes borrowed split parts into non-NULL caller-owned split_output storage. */
-static void str_fill_split_parts(str_split_out_t *split_output, str_view_t source, char separator);
+/* Writes borrowed parts plus full count into non-NULL split_output.
+ * Fails with STR_ERR_OVERFLOW without changing split_output. */
+static str_status_t str_write_split_parts(str_split_out_t *split_output, str_view_t source,
+                                          char separator);
 
 void str_init(str_t *string)
 {
-    if (string == NULL)
+    if (string == NULL) {
         return;
+    }
     str_reset_state(string);
 }
 
 void str_deinit(str_t *string)
 {
-    if (string == NULL)
+    if (string == NULL) {
         return;
-    if (str_is_owned(string))
+    }
+    if (str_is_owned(string)) {
         str_release_heap(string->buf);
+    }
     str_reset_state(string);
 }
 
 void str_clear(str_t *string)
 {
-    if (string == NULL)
+    if (string == NULL) {
         return;
+    }
     str_clear_failure(string);
     str_clear_content(string);
 }
 
 void str_clear_error(str_t *string)
 {
-    if (string == NULL)
+    if (string == NULL) {
         return;
+    }
     str_clear_failure(string);
 }
 
-void str_move(str_t *destination, str_t *string)
+void str_move(str_t *destination, str_t *source)
 {
-    if (destination == NULL || string == NULL)
+    if (destination == NULL || source == NULL) {
         return;
-    if (destination == string)
+    }
+    if (destination == source) {
         return;
+    }
     str_deinit(destination);
-    str_transfer_state(destination, string);
+    str_transfer_state(destination, source);
 }
 
-str_status_t str_copy(str_t *destination, const str_t *string)
+str_status_t str_copy(str_t *destination, const str_t *source)
 {
-    if (destination == NULL)
+    if (destination == NULL) {
         return str_argument_error();
+    }
 
     str_status_t status = str_validate_mutation(destination);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
-    if (string == NULL) {
+    }
+    if (source == NULL) {
         status = str_argument_error();
         return str_record_failure(destination, status);
     }
-    if (destination == string)
+    if (destination == source) {
         return STR_OK;
+    }
 
     str_t scratch = STR_EMPTY;
-    const char *source = str_cstr(string);
-    size_t len = str_len(string);
-    status = str_set_valid_span(&scratch, source, len);
+    const char *source_buf = str_cstr(source);
+    size_t len = str_len(source);
+    status = str_set_valid_span(&scratch, source_buf, len);
     if (status != STR_OK) {
         str_deinit(&scratch);
         return str_record_failure(destination, status);
@@ -625,10 +636,12 @@ str_status_t str_copy(str_t *destination, const str_t *string)
 
 char *str_detach(str_t *string)
 {
-    if (string == NULL)
+    if (string == NULL) {
         return NULL;
-    if (str_is_owned(string))
+    }
+    if (str_is_owned(string)) {
         return str_take_owned_buffer(string);
+    }
 
     char *owned_buf = NULL;
     str_status_t status = str_allocate_empty_buffer(&owned_buf);
@@ -644,8 +657,9 @@ const char *str_status_name(str_status_t status)
 {
     size_t name_count = sizeof(str_status_names) / sizeof(str_status_names[0]);
     for (size_t idx = 0; idx < name_count; idx++) {
-        if (str_status_names[idx].status == status)
+        if (str_status_names[idx].status == status) {
             return str_status_names[idx].name;
+        }
     }
     return "STR_ERR_UNKNOWN";
 }
@@ -655,8 +669,9 @@ str_status_t str_set(str_t *string, const char *source)
     size_t len = 0;
     str_status_t status = str_measure_c_string_input(string, &len, source);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     return str_set_valid_span(string, source, len);
 }
 
@@ -664,8 +679,9 @@ str_status_t str_set_n(str_t *string, const char *source, size_t len)
 {
     str_status_t status = str_begin_mutation(string, source, len);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     return str_set_valid_span(string, source, len);
 }
 
@@ -679,8 +695,9 @@ str_status_t str_append(str_t *string, const char *source)
     size_t len = 0;
     str_status_t status = str_measure_c_string_input(string, &len, source);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     return str_append_valid_span(string, source, len);
 }
 
@@ -688,8 +705,9 @@ str_status_t str_append_n(str_t *string, const char *source, size_t len)
 {
     str_status_t status = str_begin_mutation(string, source, len);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     return str_append_valid_span(string, source, len);
 }
 
@@ -700,9 +718,13 @@ str_status_t str_append_view(str_t *string, str_view_t source)
 
 str_status_t str_append_char(str_t *string, char byte)
 {
-    char source[1] = {byte};
+    str_status_t status = str_validate_mutation(string);
+    if (status != STR_OK) {
+        return status;
+    }
 
-    return str_append_n(string, source, 1);
+    char source[] = {byte};
+    return str_append_unaliased_span(string, source, sizeof(source));
 }
 
 str_status_t str_append_vfmt(str_t *string, const char *format, va_list arguments)
@@ -710,8 +732,9 @@ str_status_t str_append_vfmt(str_t *string, const char *format, va_list argument
     size_t format_len = 0;
     str_status_t status = str_measure_c_string_input(string, &format_len, format);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     char stack_buf[STR_FORMAT_STACK_BYTES] = {0};
     size_t rendered_len = 0;
@@ -720,8 +743,9 @@ str_status_t str_append_vfmt(str_t *string, const char *format, va_list argument
         .capacity = sizeof(stack_buf),
     };
     status = str_render_format(&rendered_len, stack_destination, format, arguments);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
 
     str_format_payload_t payload = {
         .stack_destination = stack_destination,
@@ -733,7 +757,6 @@ str_status_t str_append_vfmt(str_t *string, const char *format, va_list argument
 
 str_status_t str_append_fmt(str_t *string, const char *format, ...)
 {
-    /* Deviation: va_start is the only valid initializer for va_list. */
     va_list arguments;
 
     va_start(arguments, format);
@@ -746,18 +769,22 @@ str_status_t str_reserve(str_t *string, size_t len)
 {
     str_status_t status = str_validate_mutation(string);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
-    if (len == 0)
+    }
+    if (len == 0) {
         return STR_OK;
+    }
 
     size_t need = 0;
     status = str_calculate_capacity(&need, 0, len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
     status = str_ensure_capacity(string, need);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
     return STR_OK;
 }
 
@@ -765,10 +792,12 @@ str_status_t str_shrink_to_fit(str_t *string)
 {
     str_status_t status = str_validate_mutation(string);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
-    if (string->cap == 0)
+    }
+    if (string->cap == 0) {
         return STR_OK;
+    }
     if (string->len == 0) {
         str_discard_heap(string);
         return STR_OK;
@@ -776,11 +805,13 @@ str_status_t str_shrink_to_fit(str_t *string)
 
     size_t exact_cap = 0;
     status = str_add_size(&exact_cap, string->len, (size_t)STR_NUL_BYTES);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
     status = str_shrink_heap(string, exact_cap);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
     return STR_OK;
 }
 
@@ -788,18 +819,21 @@ str_status_t str_resize(str_t *string, size_t len, char fill)
 {
     str_status_t status = str_validate_mutation(string);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
-    if (len == string->len)
+    }
+    if (len == string->len) {
         return STR_OK;
+    }
     if (len < string->len) {
         str_close_gap(string, len, string->len - len);
         return STR_OK;
     }
 
     status = str_grow_content(string, len, fill);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
     return STR_OK;
 }
 
@@ -807,23 +841,28 @@ str_status_t str_insert_n(str_t *string, size_t idx, const char *source, size_t 
 {
     str_status_t status = str_begin_mutation(string, source, len);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     status = str_validate_span(string->len, idx, 0);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
-    if (len == 0)
+    }
+    if (len == 0) {
         return STR_OK;
+    }
 
     str_insert_request_t request = {.idx = idx, .source = source, .len = len};
     str_overlap_t overlap = {0};
     status = str_prepare_insert(string, &overlap, request);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
 
     const char *ready_source = source;
-    if (overlap.is_inside)
+    if (overlap.is_inside) {
         ready_source = string->buf + str_adjust_source_offset(overlap, request);
+    }
     request.source = ready_source;
     str_commit_insert(string, request);
     return STR_OK;
@@ -838,13 +877,16 @@ str_status_t str_remove(str_t *string, size_t idx, size_t len)
 {
     str_status_t status = str_validate_mutation(string);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     status = str_validate_span(string->len, idx, len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
-    if (len == 0)
+    }
+    if (len == 0) {
         return STR_OK;
+    }
 
     str_close_gap(string, idx, len);
     return STR_OK;
@@ -854,38 +896,45 @@ str_status_t str_replace_view(str_t *string, size_t idx, size_t remove_len, str_
 {
     str_status_t status = str_begin_mutation(string, replacement.ptr, replacement.len);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     status = str_validate_span(string->len, idx, remove_len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
-    if (remove_len == 0 && replacement.len == 0)
+    }
+    if (remove_len == 0 && replacement.len == 0) {
         return STR_OK;
+    }
 
     status = str_apply_replacement(string, idx, remove_len, replacement);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
     return STR_OK;
 }
 
 const char *str_cstr(const str_t *string)
 {
-    if (string == NULL || string->buf == NULL)
+    if (string == NULL || string->buf == NULL) {
         return str_empty_buf;
+    }
     return string->buf;
 }
 
 size_t str_len(const str_t *string)
 {
-    if (string == NULL)
+    if (string == NULL) {
         return 0;
+    }
     return string->len;
 }
 
 size_t str_capacity(const str_t *string)
 {
-    if (string == NULL || string->cap == 0)
+    if (string == NULL || string->cap == 0) {
         return 0;
+    }
     return string->cap - (size_t)STR_NUL_BYTES;
 }
 
@@ -896,8 +945,9 @@ bool str_is_empty(const str_t *string)
 
 str_status_t str_status(const str_t *string)
 {
-    if (string == NULL)
+    if (string == NULL) {
         return str_argument_error();
+    }
     return string->status;
 }
 
@@ -913,8 +963,9 @@ bool str_failed(const str_t *string)
 
 bool str_equals(const str_t *string, const str_t *other)
 {
-    if (string == NULL || other == NULL)
+    if (string == NULL || other == NULL) {
         return false;
+    }
 
     str_view_t left = str_make_view(string);
     str_view_t right = str_make_view(other);
@@ -923,8 +974,9 @@ bool str_equals(const str_t *string, const str_t *other)
 
 bool str_equals_cstr(const str_t *string, const char *other)
 {
-    if (string == NULL || other == NULL)
+    if (string == NULL || other == NULL) {
         return false;
+    }
 
     str_view_t left = str_make_view(string);
     str_view_t right = str_view_from_cstr(other);
@@ -933,8 +985,9 @@ bool str_equals_cstr(const str_t *string, const char *other)
 
 bool str_starts_with(const str_t *string, const char *prefix)
 {
-    if (string == NULL || prefix == NULL)
+    if (string == NULL || prefix == NULL) {
         return false;
+    }
 
     str_view_t value = str_make_view(string);
     str_view_t prefix_view = str_view_from_cstr(prefix);
@@ -943,8 +996,9 @@ bool str_starts_with(const str_t *string, const char *prefix)
 
 bool str_ends_with(const str_t *string, const char *suffix)
 {
-    if (string == NULL || suffix == NULL)
+    if (string == NULL || suffix == NULL) {
         return false;
+    }
 
     str_view_t value = str_make_view(string);
     str_view_t suffix_view = str_view_from_cstr(suffix);
@@ -962,27 +1016,30 @@ str_status_t str_find(const str_t *string, size_t *out_idx, const char *needle)
 
 str_status_t str_find_char(const str_t *string, size_t *out_idx, char byte)
 {
-    if (string == NULL || out_idx == NULL)
+    if (string == NULL || out_idx == NULL) {
         return str_argument_error();
+    }
 
-    char source[1] = {byte};
+    char needle_buffer[] = {byte};
     str_view_t haystack = str_make_view(string);
-    str_view_t needle = str_view_from_n(source, 1);
+    str_view_t needle = str_view_from_n(needle_buffer, sizeof(needle_buffer));
     *out_idx = str_locate_view_match(haystack, needle, STR_SEARCH_FIRST);
     return STR_OK;
 }
 
 str_view_t str_view(const str_t *string)
 {
-    if (string == NULL)
+    if (string == NULL) {
         return str_make_empty_view();
+    }
     return str_make_view(string);
 }
 
 str_status_t str_slice(const str_t *string, str_view_t *out_view, size_t offset, size_t len)
 {
-    if (string == NULL || out_view == NULL)
+    if (string == NULL || out_view == NULL) {
         return str_argument_error();
+    }
     STR_TRY(str_validate_span(string->len, offset, len));
     out_view->ptr = str_cstr(string) + offset;
     out_view->len = len;
@@ -991,8 +1048,9 @@ str_status_t str_slice(const str_t *string, str_view_t *out_view, size_t offset,
 
 str_view_t str_view_from_cstr(const char *source)
 {
-    if (source == NULL)
+    if (source == NULL) {
         return str_make_empty_view();
+    }
 
     size_t len = str_measure_c_string(source);
     return str_view_from_n(source, len);
@@ -1000,8 +1058,9 @@ str_view_t str_view_from_cstr(const char *source)
 
 str_view_t str_view_from_n(const char *source, size_t len)
 {
-    if (source == NULL && len == 0)
+    if (source == NULL && len == 0) {
         return str_make_empty_view();
+    }
     return (str_view_t){.ptr = source, .len = len};
 }
 
@@ -1012,23 +1071,26 @@ bool str_view_is_valid(str_view_t view)
 
 bool str_view_equals(str_view_t left, str_view_t right)
 {
-    if (!str_has_valid_views(left, right))
+    if (!str_has_valid_views(left, right)) {
         return false;
+    }
     return str_is_view_content_equal(left, right);
 }
 
-/* Deviation: the established public API uses int for three-way lexical order. */
 str_status_t str_view_compare(int *out_order, str_view_t left, str_view_t right)
 {
-    if (out_order == NULL)
+    if (out_order == NULL) {
         return str_argument_error();
+    }
 
     str_status_t status = str_validate_view(left);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     status = str_validate_view(right);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     *out_order = str_compare_valid_views(left, right);
     return STR_OK;
@@ -1036,15 +1098,17 @@ str_status_t str_view_compare(int *out_order, str_view_t left, str_view_t right)
 
 bool str_view_starts_with(str_view_t value, str_view_t prefix)
 {
-    if (!str_has_valid_views(value, prefix))
+    if (!str_has_valid_views(value, prefix)) {
         return false;
+    }
     return str_has_view_prefix(value, prefix);
 }
 
 bool str_view_ends_with(str_view_t value, str_view_t suffix)
 {
-    if (!str_has_valid_views(value, suffix))
+    if (!str_has_valid_views(value, suffix)) {
         return false;
+    }
     return str_has_view_suffix(value, suffix);
 }
 
@@ -1060,8 +1124,9 @@ str_status_t str_view_rfind(str_view_t haystack, size_t *out_idx, str_view_t nee
 
 str_view_t str_view_trim(str_view_t view)
 {
-    if (!str_view_is_valid(view) || view.len == 0)
+    if (!str_view_is_valid(view) || view.len == 0) {
         return str_make_empty_view();
+    }
 
     str_view_t trimmed = str_trim_view_left(view);
     return str_trim_view_right(trimmed);
@@ -1069,13 +1134,8 @@ str_view_t str_view_trim(str_view_t view)
 
 str_status_t str_split_view(str_view_t source, str_split_out_t *split_output, char separator)
 {
-    size_t count = 0;
-
     STR_TRY(str_validate_split_arguments(source, split_output));
-    STR_TRY(str_count_split_parts(&count, source, separator));
-    str_fill_split_parts(split_output, source, separator);
-    split_output->count = count;
-    return STR_OK;
+    return str_write_split_parts(split_output, source, separator);
 }
 
 #ifdef STR_TEST
@@ -1196,8 +1256,9 @@ static str_status_t str_call_malloc(char **out_buf, size_t bytes)
     assert(bytes > 0);
 
     char *allocated_buf = malloc(bytes);
-    if (allocated_buf == NULL)
+    if (allocated_buf == NULL) {
         return str_allocation_error();
+    }
     *out_buf = allocated_buf;
     return STR_OK;
 }
@@ -1209,8 +1270,9 @@ static str_status_t str_call_realloc(char **out_buf, char *buf, size_t bytes)
     assert(bytes > 0);
 
     char *resized_buf = realloc(buf, bytes);
-    if (resized_buf == NULL)
+    if (resized_buf == NULL) {
         return str_allocation_error();
+    }
     *out_buf = resized_buf;
     return STR_OK;
 }
@@ -1220,8 +1282,9 @@ static str_status_t str_allocate_heap(char **out_buf, size_t bytes)
     assert(out_buf != NULL);
     assert(bytes > 0);
     bool is_allowed = str_claim_heap_attempt();
-    if (!is_allowed)
+    if (!is_allowed) {
         return str_allocation_error();
+    }
     return str_call_malloc(out_buf, bytes);
 }
 
@@ -1231,8 +1294,9 @@ static str_status_t str_resize_heap(char **out_buf, char *buf, size_t bytes)
     assert(buf != NULL);
     assert(bytes > 0);
     bool is_allowed = str_claim_heap_attempt();
-    if (!is_allowed)
+    if (!is_allowed) {
         return str_allocation_error();
+    }
     return str_call_realloc(out_buf, buf, bytes);
 }
 
@@ -1246,8 +1310,9 @@ static str_status_t str_expand_heap(char **out_buf, char *buf, size_t bytes, boo
     assert(out_buf != NULL);
     assert(bytes > 0);
     assert((buf != NULL) == has_owned_buffer);
-    if (has_owned_buffer)
+    if (has_owned_buffer) {
         return str_resize_heap(out_buf, buf, bytes);
+    }
     return str_allocate_heap(out_buf, bytes);
 }
 
@@ -1275,8 +1340,9 @@ static str_status_t str_allocate_empty_buffer(char **out_buf)
 
     char *owned_buf = NULL;
     str_status_t status = str_allocate_heap(&owned_buf, (size_t)STR_NUL_BYTES);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     owned_buf[0] = '\0';
     *out_buf = owned_buf;
     return STR_OK;
@@ -1284,26 +1350,31 @@ static str_status_t str_allocate_empty_buffer(char **out_buf)
 
 static str_status_t str_validate_mutation(const str_t *string)
 {
-    if (string == NULL)
+    if (string == NULL) {
         return str_argument_error();
-    if (string->status != STR_OK)
+    }
+    if (string->status != STR_OK) {
         return string->status;
+    }
     return STR_OK;
 }
 
 static str_status_t str_validate_source(const char *source, size_t len)
 {
-    if (len == 0)
+    if (len == 0) {
         return STR_OK;
-    if (source == NULL)
+    }
+    if (source == NULL) {
         return str_argument_error();
+    }
     return STR_OK;
 }
 
 static str_status_t str_validate_view(str_view_t view)
 {
-    if (!str_view_is_valid(view))
+    if (!str_view_is_valid(view)) {
         return str_argument_error();
+    }
     return STR_OK;
 }
 
@@ -1317,17 +1388,20 @@ static str_status_t str_begin_mutation(str_t *string, const char *source, size_t
     STR_TRY(str_validate_mutation(string));
 
     str_status_t status = str_validate_source(source, len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
     return STR_OK;
 }
 
 static str_status_t str_validate_span(size_t len, size_t idx, size_t span)
 {
-    if (idx > len)
+    if (idx > len) {
         return str_range_error();
-    if (span > len - idx)
+    }
+    if (span > len - idx) {
         return str_range_error();
+    }
     return STR_OK;
 }
 
@@ -1338,8 +1412,9 @@ static str_status_t str_measure_bounded_c_string(size_t *out_len, const char *so
     assert(source != NULL);
 
     const char *terminator = memchr(source, '\0', available);
-    if (terminator == NULL)
+    if (terminator == NULL) {
         return str_argument_error();
+    }
     *out_len = (size_t)(terminator - source);
     return STR_OK;
 }
@@ -1348,8 +1423,9 @@ static str_status_t str_measure_c_string_input(str_t *string, size_t *out_len, c
 {
     assert(out_len != NULL);
     str_status_t status = str_validate_mutation(string);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     if (source == NULL) {
         status = str_argument_error();
         return str_record_failure(string, status);
@@ -1382,14 +1458,16 @@ static str_status_t str_measure_internal_c_string(str_t *string, size_t *out_len
 
     str_internal_span_t span = {.offset = offset, .len = (size_t)STR_NUL_BYTES};
     str_status_t status = str_validate_internal_source_span(string, span);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
 
     size_t available = (string->len - offset) + (size_t)STR_NUL_BYTES;
     const char *source = string->buf + offset;
     status = str_measure_bounded_c_string(out_len, source, available);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
     return STR_OK;
 }
 
@@ -1404,8 +1482,9 @@ static str_status_t str_record_failure(str_t *string, str_status_t status)
 static str_status_t str_add_size(size_t *out_sum, size_t base, size_t increment)
 {
     assert(out_sum != NULL);
-    if (base > SIZE_MAX - increment)
+    if (base > SIZE_MAX - increment) {
         return str_overflow_error();
+    }
     *out_sum = base + increment;
     return STR_OK;
 }
@@ -1413,10 +1492,12 @@ static str_status_t str_add_size(size_t *out_sum, size_t base, size_t increment)
 static str_status_t str_convert_printed_length(size_t *out_len, int value)
 {
     assert(out_len != NULL);
-    if (value < 0)
+    if (value < 0) {
         return str_format_error();
-    if ((uintmax_t)value > (uintmax_t)SIZE_MAX)
+    }
+    if ((uintmax_t)value > (uintmax_t)SIZE_MAX) {
         return str_overflow_error();
+    }
     *out_len = (size_t)value;
     return STR_OK;
 }
@@ -1438,8 +1519,9 @@ static size_t str_measure_c_string(const char *source)
 
 static bool str_is_byte_span_equal(const char *left, const char *right, size_t len)
 {
-    if (len == 0)
+    if (len == 0) {
         return true;
+    }
     assert(left != NULL);
     assert(right != NULL);
     return memcmp(left, right, len) == 0;
@@ -1447,25 +1529,30 @@ static bool str_is_byte_span_equal(const char *left, const char *right, size_t l
 
 static str_compare_order_t str_compare_bytes(const char *left, const char *right, size_t len)
 {
-    if (len == 0)
+    if (len == 0) {
         return STR_COMPARE_EQUAL;
+    }
     assert(left != NULL);
     assert(right != NULL);
 
     int order = memcmp(left, right, len);
-    if (order < 0)
+    if (order < 0) {
         return STR_COMPARE_LESS;
-    if (order > 0)
+    }
+    if (order > 0) {
         return STR_COMPARE_GREATER;
+    }
     return STR_COMPARE_EQUAL;
 }
 
 static str_compare_order_t str_compare_lengths(size_t left_len, size_t right_len)
 {
-    if (left_len < right_len)
+    if (left_len < right_len) {
         return STR_COMPARE_LESS;
-    if (left_len > right_len)
+    }
+    if (left_len > right_len) {
         return STR_COMPARE_GREATER;
+    }
     return STR_COMPARE_EQUAL;
 }
 
@@ -1476,8 +1563,9 @@ static str_compare_order_t str_compare_valid_views(str_view_t left, str_view_t r
 
     size_t common_len = left.len < right.len ? left.len : right.len;
     str_compare_order_t order = str_compare_bytes(left.ptr, right.ptr, common_len);
-    if (order != STR_COMPARE_EQUAL)
+    if (order != STR_COMPARE_EQUAL) {
         return order;
+    }
     return str_compare_lengths(left.len, right.len);
 }
 
@@ -1485,8 +1573,9 @@ static bool str_is_view_content_equal(str_view_t left, str_view_t right)
 {
     assert(str_view_is_valid(left));
     assert(str_view_is_valid(right));
-    if (left.len != right.len)
+    if (left.len != right.len) {
         return false;
+    }
     return str_is_byte_span_equal(left.ptr, right.ptr, left.len);
 }
 
@@ -1494,8 +1583,9 @@ static bool str_has_view_prefix(str_view_t value, str_view_t prefix)
 {
     assert(str_view_is_valid(value));
     assert(str_view_is_valid(prefix));
-    if (prefix.len > value.len)
+    if (prefix.len > value.len) {
         return false;
+    }
     return str_is_byte_span_equal(value.ptr, prefix.ptr, prefix.len);
 }
 
@@ -1503,10 +1593,12 @@ static bool str_has_view_suffix(str_view_t value, str_view_t suffix)
 {
     assert(str_view_is_valid(value));
     assert(str_view_is_valid(suffix));
-    if (suffix.len > value.len)
+    if (suffix.len > value.len) {
         return false;
-    if (suffix.len == 0)
+    }
+    if (suffix.len == 0) {
         return true;
+    }
 
     size_t suffix_offset = value.len - suffix.len;
     return str_is_byte_span_equal(value.ptr + suffix_offset, suffix.ptr, suffix.len);
@@ -1514,35 +1606,37 @@ static bool str_has_view_suffix(str_view_t value, str_view_t suffix)
 
 static void str_move_bytes(char *destination, const char *source, size_t len)
 {
-    if (len == 0)
+    if (len == 0) {
         return;
+    }
     assert(destination != NULL);
     assert(source != NULL);
-    /* Deviation: Annex K memmove_s is optional. Callers assert writable bounds. */
+    /* Annex K memmove_s is optional. Callers assert writable bounds. */
     /* NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
     memmove(destination, source, len);
 }
 
-static void str_fill_bytes(char *destination, size_t len, uint8_t byte)
+static void str_fill_bytes(char *destination, size_t len, unsigned char byte)
 {
     assert(destination != NULL);
-    /* Deviation: Annex K memset_s is optional. Callers assert writable bounds. */
+    /* Annex K memset_s is optional. Callers assert writable bounds. */
     /* NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
     memset(destination, (int)byte, len);
 }
 
-static uint8_t str_read_view_byte(str_view_t view, size_t idx)
+static unsigned char str_read_view_byte(str_view_t view, size_t idx)
 {
     assert(view.ptr != NULL);
     assert(idx < view.len);
-    return (uint8_t)view.ptr[idx];
+    return (unsigned char)view.ptr[idx];
 }
 
 static const char *str_get_view_buffer(str_view_t view)
 {
     assert(str_view_is_valid(view));
-    if (view.ptr == NULL)
+    if (view.ptr == NULL) {
         return str_empty_buf;
+    }
     return view.ptr;
 }
 
@@ -1581,8 +1675,9 @@ static str_status_t str_choose_capacity(size_t *out_cap, size_t current_cap, siz
     }
 
     size_t cap = current_cap;
-    if (cap < (size_t)STR_MIN_CAPACITY_BYTES)
+    if (cap < (size_t)STR_MIN_CAPACITY_BYTES) {
         cap = (size_t)STR_MIN_CAPACITY_BYTES;
+    }
     return str_grow_capacity(out_cap, cap, need);
 }
 
@@ -1594,10 +1689,12 @@ static str_status_t str_grow_heap(str_t *string, size_t new_cap)
     bool has_owned_buffer = str_is_owned(string);
     char *grown_buf = NULL;
     str_status_t status = str_expand_heap(&grown_buf, string->buf, new_cap, has_owned_buffer);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
-    if (!has_owned_buffer)
+    }
+    if (!has_owned_buffer) {
         grown_buf[0] = '\0';
+    }
     string->buf = grown_buf;
     string->cap = new_cap;
     assert(string->buf != NULL);
@@ -1608,13 +1705,15 @@ static str_status_t str_grow_heap(str_t *string, size_t new_cap)
 static str_status_t str_ensure_capacity(str_t *string, size_t need)
 {
     assert(string != NULL);
-    if (need <= string->cap)
+    if (need <= string->cap) {
         return STR_OK;
+    }
 
     size_t new_cap = 0;
     str_status_t status = str_choose_capacity(&new_cap, string->cap, need);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     return str_grow_heap(string, new_cap);
 }
 
@@ -1622,16 +1721,18 @@ static size_t str_find_allocation_offset(const str_t *string, const char *source
 {
     assert(string != NULL);
     assert(source != NULL);
-    if (string->buf == NULL)
+    if (string->buf == NULL) {
         return STR_NPOS;
-
-    /* Equality scanning avoids implementation-defined ordering of unrelated pointers. */
-    for (size_t idx = 0; idx < string->cap; idx++) {
-        if (source == string->buf + idx)
-            return idx;
     }
-    if (source == string->buf + string->cap)
+
+    for (size_t offset = 0; offset < string->cap; offset++) {
+        if (source == string->buf + offset) {
+            return offset;
+        }
+    }
+    if (source == string->buf + string->cap) {
         return string->cap;
+    }
     return STR_NPOS;
 }
 
@@ -1641,11 +1742,13 @@ static str_status_t str_validate_internal_source_span(const str_t *string, str_i
     assert(string->buf != NULL);
     assert(span.len > 0);
 
-    if (span.offset > string->len)
+    if (span.offset > string->len) {
         return str_argument_error();
+    }
     size_t remaining = (string->len - span.offset) + (size_t)STR_NUL_BYTES;
-    if (span.len > remaining)
+    if (span.len > remaining) {
         return str_argument_error();
+    }
     return STR_OK;
 }
 
@@ -1660,8 +1763,9 @@ static str_status_t str_detect_overlap(const str_t *string, str_overlap_t *out_o
     out_overlap->is_inside = false;
     out_overlap->idx = 0;
     size_t idx = str_find_allocation_offset(string, source);
-    if (idx == STR_NPOS)
+    if (idx == STR_NPOS) {
         return STR_OK;
+    }
     str_internal_span_t span = {.offset = idx, .len = len};
     STR_TRY(str_validate_internal_source_span(string, span));
 
@@ -1680,11 +1784,13 @@ static str_status_t str_prepare_insert(str_t *string, str_overlap_t *out_overlap
 
     size_t need = 0;
     str_status_t status = str_calculate_capacity(&need, string->len, request.len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     status = str_detect_overlap(string, out_overlap, request.source, request.len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     return str_ensure_capacity(string, need);
 }
 
@@ -1698,17 +1804,20 @@ static str_status_t str_prepare_write(str_t *string, const char **out_source,
 
     size_t need = 0;
     str_status_t status = str_calculate_capacity(&need, request.base_len, request.len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     str_overlap_t overlap = {0};
     status = str_detect_overlap(string, &overlap, request.source, request.len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     status = str_ensure_capacity(string, need);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     *out_source = overlap.is_inside ? string->buf + overlap.idx : request.source;
     return STR_OK;
@@ -1724,8 +1833,9 @@ static str_status_t str_prepare_valid_span(str_t *string, const char **out_sourc
     assert(request.len > 0);
 
     str_status_t status = str_prepare_write(string, out_source, request);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
     return STR_OK;
 }
 
@@ -1741,8 +1851,9 @@ static str_status_t str_set_valid_span(str_t *string, const char *source, size_t
     const char *ready_source = NULL;
     str_write_request_t request = {.source = source, .len = len, .base_len = 0};
     str_status_t status = str_prepare_valid_span(string, &ready_source, request);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     str_replace_content(string, ready_source, len);
     return STR_OK;
@@ -1752,16 +1863,41 @@ static str_status_t str_append_valid_span(str_t *string, const char *source, siz
 {
     assert(string != NULL);
     assert(string->status == STR_OK);
-    if (len == 0)
+    if (len == 0) {
         return STR_OK;
+    }
 
     const char *ready_source = NULL;
     str_write_request_t request = {.source = source, .len = len, .base_len = string->len};
     str_status_t status = str_prepare_valid_span(string, &ready_source, request);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     str_append_content(string, ready_source, len);
+    return STR_OK;
+}
+
+static str_status_t str_append_unaliased_span(str_t *string, const char *source, size_t len)
+{
+    assert(string != NULL);
+    assert(string->status == STR_OK);
+    assert(source != NULL);
+    if (len == 0) {
+        return STR_OK;
+    }
+
+    size_t need = 0;
+    str_status_t status = str_calculate_capacity(&need, string->len, len);
+    if (status != STR_OK) {
+        return str_record_failure(string, status);
+    }
+    status = str_ensure_capacity(string, need);
+    if (status != STR_OK) {
+        return str_record_failure(string, status);
+    }
+
+    str_append_content(string, source, len);
     return STR_OK;
 }
 
@@ -1797,24 +1933,13 @@ static void str_append_content(str_t *string, const char *source, size_t len)
     str_write_terminator(string);
 }
 
-static void str_open_gap(str_t *string, size_t idx, size_t len)
-{
-    assert(string != NULL);
-    assert(string->buf != NULL);
-    assert(idx <= string->len);
-    assert(string->len < string->cap);
-    assert(len <= string->cap - string->len - (size_t)STR_NUL_BYTES);
-
-    size_t tail_len = (string->len - idx) + (size_t)STR_NUL_BYTES;
-    str_move_bytes(string->buf + idx + len, string->buf + idx, tail_len);
-}
-
 static size_t str_adjust_source_offset(str_overlap_t overlap, str_insert_request_t request)
 {
     assert(overlap.is_inside);
     assert(request.len > 0);
-    if (overlap.idx >= request.idx)
+    if (overlap.idx >= request.idx) {
         return overlap.idx + request.len;
+    }
     return overlap.idx;
 }
 
@@ -1830,11 +1955,17 @@ static void str_write_content(str_t *string, size_t idx, const char *source, siz
 static void str_commit_insert(str_t *string, str_insert_request_t request)
 {
     assert(string != NULL);
+    assert(string->buf != NULL);
     assert(request.idx <= string->len);
-    str_open_gap(string, request.idx, request.len);
-    str_write_content(string, request.idx, request.source, request.len);
+    assert(request.source != NULL);
+    assert(request.len <= string->cap - string->len - (size_t)STR_NUL_BYTES);
+
+    size_t tail_len = (string->len - request.idx) + (size_t)STR_NUL_BYTES;
+    str_move_bytes(string->buf + request.idx + request.len, string->buf + request.idx, tail_len);
+    str_move_bytes(string->buf + request.idx, request.source, request.len);
     string->len += request.len;
     str_write_terminator(string);
+    assert(string->buf[string->len] == '\0');
 }
 
 static void str_close_gap(str_t *string, size_t idx, size_t len)
@@ -1856,7 +1987,7 @@ static void str_extend_content(str_t *string, size_t len, char fill)
     assert(string->buf != NULL);
     assert(string->len < len);
     assert(len < string->cap);
-    str_fill_bytes(string->buf + string->len, len - string->len, (uint8_t)fill);
+    str_fill_bytes(string->buf + string->len, len - string->len, (unsigned char)fill);
     string->len = len;
     str_write_terminator(string);
 }
@@ -1868,11 +1999,13 @@ static str_status_t str_grow_content(str_t *string, size_t len, char fill)
 
     size_t need = 0;
     str_status_t status = str_calculate_capacity(&need, 0, len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     status = str_ensure_capacity(string, need);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     str_extend_content(string, len, fill);
     return STR_OK;
 }
@@ -1891,13 +2024,15 @@ static str_status_t str_shrink_heap(str_t *string, size_t exact_cap)
     assert(string != NULL);
     assert(string->buf != NULL);
     assert(exact_cap > 0);
-    if (exact_cap == string->cap)
+    if (exact_cap == string->cap) {
         return STR_OK;
+    }
 
     char *shrunk_buf = NULL;
     str_status_t status = str_resize_heap(&shrunk_buf, string->buf, exact_cap);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     string->buf = shrunk_buf;
     string->cap = exact_cap;
     assert(string->buf != NULL);
@@ -1913,20 +2048,24 @@ static str_status_t str_stage_replacement(const str_t *string, str_staged_view_t
     assert(str_view_is_valid(source));
     out_staged->view = source;
     out_staged->owned_buf = NULL;
-    if (source.len == 0)
+    if (source.len == 0) {
         return STR_OK;
+    }
 
     str_overlap_t overlap = {0};
     str_status_t status = str_detect_overlap(string, &overlap, source.ptr, source.len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
-    if (!overlap.is_inside)
+    }
+    if (!overlap.is_inside) {
         return STR_OK;
+    }
 
     char *owned_buf = NULL;
     status = str_allocate_heap(&owned_buf, source.len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     str_move_bytes(owned_buf, source.ptr, source.len);
     out_staged->view.ptr = owned_buf;
     out_staged->owned_buf = owned_buf;
@@ -1972,11 +2111,13 @@ static str_status_t str_replace_equal_span(str_t *string, size_t idx, str_view_t
 
     str_overlap_t overlap = {0};
     str_status_t status = str_detect_overlap(string, &overlap, replacement.ptr, replacement.len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     const char *valid_source = replacement.ptr;
-    if (overlap.is_inside)
+    if (overlap.is_inside) {
         valid_source = string->buf + overlap.idx;
+    }
     str_write_content(string, idx, valid_source, replacement.len);
     return STR_OK;
 }
@@ -1995,13 +2136,15 @@ static str_status_t str_replace_resized_span(str_t *string, str_replace_request_
 
     size_t need = 0;
     str_status_t status = str_calculate_capacity(&need, 0, request.new_len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     str_staged_view_t staged = {.view = request.replacement, .owned_buf = NULL};
     status = str_stage_replacement(string, &staged, request.replacement);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     status = str_ensure_capacity(string, need);
     if (status != STR_OK) {
@@ -2021,14 +2164,16 @@ static str_status_t str_apply_replacement(str_t *string, size_t idx, size_t remo
     assert(str_view_is_valid(replacement));
     assert(idx <= string->len);
     assert(remove_len <= string->len - idx);
-    if (remove_len == replacement.len)
+    if (remove_len == replacement.len) {
         return str_replace_equal_span(string, idx, replacement);
+    }
 
     size_t new_len = 0;
     str_status_t status =
         str_calculate_replacement_length(&new_len, string->len, remove_len, replacement.len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     str_replace_request_t request = {
         .idx = idx,
@@ -2047,15 +2192,15 @@ static str_status_t str_render_format(size_t *out_len, str_format_destination_t 
     assert(destination.capacity > 0);
     assert(format != NULL);
 
-    /* Deviation: va_copy is the only portable initializer for a va_list copy. */
     va_list arguments_copy;
     va_copy(arguments_copy, arguments);
-    /* Deviation: Annex K vsnprintf_s is optional. Destination capacity is explicit. */
-    /* NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
+    /* Annex K vsnprintf_s is optional. Destination capacity is explicit. */
+    /* NOLINTNEXTLINE(clang-analyzer-security.*, clang-analyzer-valist.Uninitialized) */
     int printed = vsnprintf(destination.buf, destination.capacity, format, arguments_copy);
     va_end(arguments_copy);
-    if (printed < 0)
+    if (printed < 0) {
         return str_format_error();
+    }
     return str_convert_printed_length(out_len, printed);
 }
 
@@ -2069,10 +2214,12 @@ static str_status_t str_verify_format_render(str_format_destination_t destinatio
     size_t rendered_len = 0;
     str_status_t status = str_render_format(&rendered_len, destination, format, arguments);
 
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
-    if (rendered_len != expected_len)
+    }
+    if (rendered_len != expected_len) {
         return str_format_error();
+    }
     return STR_OK;
 }
 
@@ -2084,13 +2231,15 @@ static str_status_t str_build_formatted_buffer(char **out_buf, size_t expected_l
 
     size_t capacity = 0;
     str_status_t status = str_calculate_capacity(&capacity, 0, expected_len);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     char *buf = NULL;
     status = str_allocate_heap(&buf, capacity);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     str_format_destination_t destination = {.buf = buf, .capacity = capacity};
     status = str_verify_format_render(destination, expected_len, format, arguments);
@@ -2109,16 +2258,20 @@ static str_status_t str_append_format_payload(str_t *string, str_format_payload_
     assert(string != NULL);
     assert(payload.format != NULL);
     assert(payload.stack_destination.buf != NULL);
-    if (payload.rendered_len < payload.stack_destination.capacity)
-        return str_append_valid_span(string, payload.stack_destination.buf, payload.rendered_len);
+    if (payload.rendered_len < payload.stack_destination.capacity) {
+        return str_append_unaliased_span(string, payload.stack_destination.buf,
+                                         payload.rendered_len);
+    }
 
     char *rendered_buf = NULL;
+    /* Standard C has no side-effect-free size query; the public contract documents rerendering. */
     str_status_t status =
         str_build_formatted_buffer(&rendered_buf, payload.rendered_len, payload.format, arguments);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return str_record_failure(string, status);
+    }
 
-    status = str_append_valid_span(string, rendered_buf, payload.rendered_len);
+    status = str_append_unaliased_span(string, rendered_buf, payload.rendered_len);
     str_release_heap(rendered_buf);
     return status;
 }
@@ -2137,23 +2290,27 @@ static str_view_t str_make_empty_view(void)
 static str_status_t str_validate_find_arguments(const str_t *string, const size_t *out_idx,
                                                 const char *needle)
 {
-    if (string == NULL || out_idx == NULL || needle == NULL)
+    if (string == NULL || out_idx == NULL || needle == NULL) {
         return str_argument_error();
+    }
     return STR_OK;
 }
 
 static str_status_t str_find_view_match(size_t *out_idx, str_view_t haystack, str_view_t needle,
                                         str_search_mode_t mode)
 {
-    if (out_idx == NULL)
+    if (out_idx == NULL) {
         return str_argument_error();
+    }
 
     str_status_t status = str_validate_view(haystack);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
     status = str_validate_view(needle);
-    if (status != STR_OK)
+    if (status != STR_OK) {
         return status;
+    }
 
     *out_idx = str_locate_view_match(haystack, needle, mode);
     return STR_OK;
@@ -2164,22 +2321,25 @@ static size_t str_locate_view_match(str_view_t haystack, str_view_t needle, str_
     assert(str_view_is_valid(haystack));
     assert(str_view_is_valid(needle));
     assert(mode == STR_SEARCH_FIRST || mode == STR_SEARCH_LAST);
-    if (needle.len > 0)
+    if (needle.len > 0) {
         return str_search_view(haystack, needle, mode);
-    if (mode == STR_SEARCH_FIRST)
+    }
+    if (mode == STR_SEARCH_FIRST) {
         return 0;
+    }
     return haystack.len;
 }
 
-static bool str_is_byte_before(uint8_t left, uint8_t right, bool is_reverse_order)
+static bool str_is_byte_before(unsigned char left, unsigned char right, bool is_reverse_order)
 {
-    if (is_reverse_order)
+    if (is_reverse_order) {
         return left > right;
+    }
     return left < right;
 }
 
-static void str_suffix_walk_step(str_suffix_walk_t *walk, uint8_t candidate_byte,
-                                 uint8_t suffix_byte, bool is_reverse_order)
+static void str_suffix_walk_step(str_suffix_walk_t *walk, unsigned char candidate_byte,
+                                 unsigned char suffix_byte, bool is_reverse_order)
 {
     assert(walk != NULL);
     if (candidate_byte == suffix_byte) {
@@ -2212,13 +2372,14 @@ static bool str_run_suffix_walk_pass(str_suffix_walk_t *walk, str_view_t needle,
     assert(walk->offset > 0);
 
     for (size_t step = 0; step < needle.len; step++) {
-        if (walk->offset >= needle.len - walk->candidate)
+        if (walk->offset >= needle.len - walk->candidate) {
             return true;
+        }
 
         size_t suffix_idx = walk->factor.cut + walk->offset - (size_t)STR_NUL_BYTES;
-        uint8_t suffix_byte = str_read_view_byte(needle, suffix_idx);
+        unsigned char suffix_byte = str_read_view_byte(needle, suffix_idx);
         size_t candidate_idx = walk->candidate + walk->offset;
-        uint8_t candidate_byte = str_read_view_byte(needle, candidate_idx);
+        unsigned char candidate_byte = str_read_view_byte(needle, candidate_idx);
         str_suffix_walk_step(walk, candidate_byte, suffix_byte, is_reverse_order);
     }
     return walk->offset >= needle.len - walk->candidate;
@@ -2237,8 +2398,9 @@ static str_factor_t str_find_maximal_suffix(str_view_t needle, bool is_reverse_o
 
     for (size_t pass = 0; pass < (size_t)STR_SUFFIX_WALK_PASSES; pass++) {
         bool is_complete = str_run_suffix_walk_pass(&walk, needle, is_reverse_order);
-        if (is_complete)
+        if (is_complete) {
             return walk.factor;
+        }
     }
 
     /* Two-Way maximal-suffix factorization performs fewer than twice len comparisons. */
@@ -2254,8 +2416,9 @@ static str_factor_t str_find_critical_factor(str_view_t needle)
     str_factor_t forward = str_find_maximal_suffix(needle, false);
     str_factor_t reverse = str_find_maximal_suffix(needle, true);
 
-    if (reverse.cut > forward.cut)
+    if (reverse.cut > forward.cut) {
         return reverse;
+    }
     return forward;
 }
 
@@ -2264,8 +2427,9 @@ static bool str_is_factor_periodic(str_view_t needle, str_factor_t factor)
     assert(needle.ptr != NULL);
     assert(factor.cut < needle.len);
     assert(factor.period > 0);
-    if (factor.period > needle.len - factor.cut)
+    if (factor.period > needle.len - factor.cut) {
         return false;
+    }
     return str_is_byte_span_equal(needle.ptr, needle.ptr + factor.period, factor.cut);
 }
 
@@ -2276,8 +2440,9 @@ static size_t str_calculate_nonperiodic_shift(str_view_t needle, str_factor_t fa
 
     size_t left_shift = factor.cut;
     size_t right_shift = needle.len - factor.cut + (size_t)STR_NUL_BYTES;
-    if (left_shift > right_shift)
+    if (left_shift > right_shift) {
         return left_shift;
+    }
     return right_shift;
 }
 
@@ -2291,10 +2456,12 @@ static size_t str_scan_right(str_view_t haystack, str_view_t needle, str_factor_
     assert(state.memory < needle.len);
 
     size_t scan = factor.cut;
-    if (state.memory > scan)
+    if (state.memory > scan) {
         scan = state.memory;
-    while (scan < needle.len && needle.ptr[scan] == haystack.ptr[state.idx + scan])
+    }
+    while (scan < needle.len && needle.ptr[scan] == haystack.ptr[state.idx + scan]) {
         scan++;
+    }
     return scan;
 }
 
@@ -2310,8 +2477,9 @@ static bool str_has_candidate_left_match(str_view_t haystack, str_view_t needle,
     size_t scan = factor.cut;
     while (scan > state.memory) {
         size_t idx = scan - (size_t)STR_NUL_BYTES;
-        if (needle.ptr[idx] != haystack.ptr[state.idx + idx])
+        if (needle.ptr[idx] != haystack.ptr[state.idx + idx]) {
             return false;
+        }
         scan--;
     }
     return true;
@@ -2322,8 +2490,9 @@ static bool str_search_advance(str_search_state_t *state, size_t last_idx, size_
     assert(state != NULL);
     assert(state->idx <= last_idx);
     assert(shift > 0);
-    if (shift > last_idx - state->idx)
+    if (shift > last_idx - state->idx) {
         return false;
+    }
     state->idx += shift;
     return true;
 }
@@ -2333,10 +2502,11 @@ static size_t str_search_view(str_view_t haystack, str_view_t needle, str_search
     assert(needle.ptr != NULL);
     assert(needle.len > 0);
     assert(mode == STR_SEARCH_FIRST || mode == STR_SEARCH_LAST);
-    if (haystack.ptr == NULL || haystack.len < needle.len)
+    if (haystack.ptr == NULL || haystack.len < needle.len) {
         return STR_NPOS;
+    }
     if (needle.len == (size_t)STR_NUL_BYTES) {
-        str_byte_search_t search = {.byte = (uint8_t)needle.ptr[0], .mode = mode};
+        str_byte_search_t search = {.byte = (unsigned char)needle.ptr[0], .mode = mode};
         return str_search_view_byte(haystack, search);
     }
 
@@ -2356,8 +2526,9 @@ static size_t str_search_two_way(str_view_t haystack, str_view_t needle, str_sea
     for (size_t step = 0; step <= context.last_idx; step++) {
         assert(state.idx <= context.last_idx);
         bool has_next = str_search_step(&context, &state, &found);
-        if (!has_next)
+        if (!has_next) {
             return found;
+        }
     }
     return found;
 }
@@ -2406,8 +2577,9 @@ static bool str_search_after_right_match(const str_search_context_t *context,
     assert(found != NULL);
     if (str_has_candidate_left_match(context->haystack, context->needle, context->factor, *state)) {
         *found = state->idx;
-        if (context->mode == STR_SEARCH_FIRST)
+        if (context->mode == STR_SEARCH_FIRST) {
             return false;
+        }
     }
 
     bool has_next = str_search_advance(state, context->last_idx, context->full_shift);
@@ -2423,23 +2595,25 @@ static bool str_search_step(const str_search_context_t *context, str_search_stat
     assert(found != NULL);
 
     size_t mismatch = str_scan_right(context->haystack, context->needle, context->factor, *state);
-    if (mismatch < context->needle.len)
+    if (mismatch < context->needle.len) {
         return str_search_on_mismatch(context, state, mismatch);
+    }
     return str_search_after_right_match(context, state, found);
 }
 
-static size_t str_view_find_byte(str_view_t haystack, uint8_t byte)
+static size_t str_view_find_byte(str_view_t haystack, unsigned char byte)
 {
     assert(haystack.ptr != NULL);
     assert(haystack.len > 0);
 
     const char *match = memchr(haystack.ptr, (int)byte, haystack.len);
-    if (match == NULL)
+    if (match == NULL) {
         return STR_NPOS;
+    }
     return (size_t)(match - haystack.ptr);
 }
 
-static size_t str_view_rfind_byte(str_view_t haystack, uint8_t byte)
+static size_t str_view_rfind_byte(str_view_t haystack, unsigned char byte)
 {
     assert(haystack.ptr != NULL);
     assert(haystack.len > 0);
@@ -2447,8 +2621,9 @@ static size_t str_view_rfind_byte(str_view_t haystack, uint8_t byte)
     size_t idx = haystack.len;
     while (idx > 0) {
         idx--;
-        if ((uint8_t)haystack.ptr[idx] == byte)
+        if ((unsigned char)haystack.ptr[idx] == byte) {
             return idx;
+        }
     }
     return STR_NPOS;
 }
@@ -2457,8 +2632,9 @@ static size_t str_search_view_byte(str_view_t haystack, str_byte_search_t search
 {
     assert(haystack.ptr != NULL);
     assert(haystack.len > 0);
-    if (search.mode == STR_SEARCH_FIRST)
+    if (search.mode == STR_SEARCH_FIRST) {
         return str_view_find_byte(haystack, search.byte);
+    }
     return str_view_rfind_byte(haystack, search.byte);
 }
 
@@ -2467,8 +2643,9 @@ static bool str_is_ascii_whitespace(char byte)
     size_t whitespace_count =
         sizeof(str_ascii_whitespace_bytes) / sizeof(str_ascii_whitespace_bytes[0]);
     for (size_t idx = 0; idx < whitespace_count; idx++) {
-        if (byte == str_ascii_whitespace_bytes[idx])
+        if (byte == str_ascii_whitespace_bytes[idx]) {
             return true;
+        }
     }
     return false;
 }
@@ -2486,18 +2663,21 @@ static str_view_t str_trim_view_left(str_view_t view)
 static str_view_t str_trim_view_right(str_view_t view)
 {
     assert(str_view_is_valid(view));
-    while (view.len > 0 && str_is_ascii_whitespace(view.ptr[view.len - 1]))
+    while (view.len > 0 && str_is_ascii_whitespace(view.ptr[view.len - 1])) {
         view.len--;
+    }
     return view;
 }
 
 static str_status_t str_validate_split_arguments(str_view_t source,
                                                  const str_split_out_t *split_output)
 {
-    if (split_output == NULL)
+    if (split_output == NULL) {
         return str_argument_error();
-    if (split_output->cap > 0 && split_output->parts == NULL)
+    }
+    if (split_output->cap > 0 && split_output->parts == NULL) {
         return str_argument_error();
+    }
     return str_validate_view(source);
 }
 
@@ -2505,8 +2685,9 @@ static void str_store_split_part(str_split_out_t *split_output, size_t count, co
                                  size_t len)
 {
     assert(split_output != NULL);
-    if (count >= split_output->cap)
+    if (count >= split_output->cap) {
         return;
+    }
     assert(split_output->parts != NULL);
 
     str_view_t *parts = split_output->parts;
@@ -2517,53 +2698,44 @@ static void str_store_split_part(str_split_out_t *split_output, size_t count, co
 
 static size_t str_find_separator(str_view_t source, str_split_cursor_t cursor)
 {
-    const char *buffer = str_get_view_buffer(source);
-
+    assert(str_view_is_valid(source));
     assert(cursor.idx <= source.len);
+    const char *buffer = str_get_view_buffer(source);
     for (size_t idx = cursor.idx; idx < source.len; idx++) {
-        if (buffer[idx] == cursor.separator)
+        if (buffer[idx] == cursor.separator) {
             return idx;
+        }
     }
     return STR_NPOS;
 }
 
-static str_status_t str_count_split_parts(size_t *out_count, str_view_t source, char separator)
+static str_status_t str_write_split_parts(str_split_out_t *split_output, str_view_t source,
+                                          char separator)
 {
-    size_t count = 1;
-    str_split_cursor_t cursor = {.idx = 0, .separator = separator};
-
-    assert(out_count != NULL);
+    assert(split_output != NULL);
     assert(str_view_is_valid(source));
-    if (source.len == SIZE_MAX)
+    if (source.len == SIZE_MAX) {
         return str_overflow_error();
-
-    while (cursor.idx < source.len) {
-        size_t separator_idx = str_find_separator(source, cursor);
-        if (separator_idx == STR_NPOS)
-            break;
-        count++;
-        cursor.idx = separator_idx + 1;
     }
-    *out_count = count;
-    return STR_OK;
-}
 
-static void str_fill_split_parts(str_split_out_t *split_output, str_view_t source, char separator)
-{
     const char *buffer = str_get_view_buffer(source);
     size_t start = 0;
-    size_t part_idx = 0;
+    size_t count = 0;
     str_split_cursor_t cursor = {.idx = 0, .separator = separator};
-
-    assert(split_output != NULL);
     while (cursor.idx < source.len) {
         size_t separator_idx = str_find_separator(source, cursor);
-        if (separator_idx == STR_NPOS)
+        if (separator_idx == STR_NPOS) {
             break;
-        str_store_split_part(split_output, part_idx, buffer + start, separator_idx - start);
-        part_idx++;
-        start = separator_idx + 1;
+        }
+        str_store_split_part(split_output, count, buffer + start, separator_idx - start);
+        count++;
+        start = separator_idx + (size_t)STR_NUL_BYTES;
         cursor.idx = start;
     }
-    str_store_split_part(split_output, part_idx, buffer + start, source.len - start);
+    str_store_split_part(split_output, count, buffer + start, source.len - start);
+    count++;
+    split_output->count = count;
+    assert(split_output->count > 0);
+    assert(split_output->count <= source.len + (size_t)STR_NUL_BYTES);
+    return STR_OK;
 }

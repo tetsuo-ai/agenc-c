@@ -543,15 +543,23 @@ static void test_null_outputs(void)
 
 static void test_view_trim(void)
 {
+    const char ascii_only_whitespace[] = {(char)0x20, (char)0x09, (char)0x0a,
+                                          (char)0x0b, (char)0x0c, (char)0x0d};
+    const char ascii_whitespace[] = {(char)0x20, (char)0x09, (char)0x0a, (char)0x0b, (char)0x0c,
+                                     (char)0x0d, 'x',        (char)0x0d, (char)0x0c, (char)0x0b,
+                                     (char)0x0a, (char)0x09, (char)0x20};
+    const char ascii_near_misses[] = {(char)0x08, 'x', (char)0x0e};
     str_view_t view;
 
-    view = str_view_trim(str_view_from_cstr("  hi\t\n"));
-    EXPECT(view.len == 2);
-    EXPECT(view.ptr[0] == 'h' && view.ptr[1] == 'i');
-    view = str_view_trim(str_view_from_cstr("   \n"));
+    view = str_view_trim(str_view_from_n(ascii_only_whitespace, sizeof(ascii_only_whitespace)));
     EXPECT(view.len == 0);
     view = str_view_trim(str_view_from_n(NULL, 0));
     EXPECT(view.len == 0);
+    view = str_view_trim(str_view_from_n(ascii_whitespace, sizeof(ascii_whitespace)));
+    EXPECT(view.len == 1);
+    EXPECT(view.ptr[0] == 'x');
+    view = str_view_trim(str_view_from_n(ascii_near_misses, sizeof(ascii_near_misses)));
+    EXPECT(view.len == sizeof(ascii_near_misses));
 }
 
 static void test_clear(void)
@@ -727,6 +735,7 @@ static void test_replace_view(void)
 #ifdef STR_TEST
 static void test_replace_oom_preserves(void)
 {
+    static const char full_minimum_capacity_string[] = "abcdefghijklmno";
     static const char long_replacement[] = "0123456789abcdef0123456789abcdef";
     str_t s = STR_EMPTY;
 
@@ -739,6 +748,22 @@ static void test_replace_oom_preserves(void)
     test_restore_alloc();
 
     str_clear_error(&s);
+    EXPECT(str_set(&s, full_minimum_capacity_string) == STR_OK);
+    char *old_buf = s.buf;
+    size_t old_len = s.len;
+    size_t old_cap = s.cap;
+    replacement = str_view_from_n(str_cstr(&s), str_len(&s));
+    str_test_fail_alloc_after(1);
+    EXPECT(str_replace_view(&s, 0, TEST_SPLIT_TRUNC, replacement) == STR_ERR_ALLOC);
+    EXPECT(str_equals_cstr(&s, full_minimum_capacity_string));
+    EXPECT(s.buf == old_buf);
+    EXPECT(s.len == old_len);
+    EXPECT(s.cap == old_cap);
+    EXPECT(str_status(&s) == STR_ERR_ALLOC);
+    test_restore_alloc();
+
+    str_clear_error(&s);
+    EXPECT(str_set(&s, "abcdef") == STR_OK);
     str_test_fail_alloc_after(0);
     EXPECT(str_replace_view(&s, TEST_SLICE_OFF, TEST_SPLIT_TRUNC,
                             str_view_from_cstr(long_replacement)) == STR_ERR_ALLOC);

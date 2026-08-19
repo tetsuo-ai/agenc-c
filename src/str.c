@@ -1,5 +1,7 @@
 /* str.c: owns growable byte strings, including their heap buffers. */
 
+#include "str.h"
+
 #include <assert.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -9,8 +11,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include "str.h"
 
 enum {
     STR_MIN_CAPACITY_BYTES = 16,
@@ -140,13 +140,15 @@ typedef struct {
 } str_status_name_t;
 
 #ifdef STR_TEST
-/* Deviation: test-only mutable counter injects deterministic allocation failure. */
-static size_t str_test_alloc_budget = SIZE_MAX;
+/* Deviation: test-only mutable state injects deterministic allocation failure. */
+static bool str_test_alloc_failures_enabled;
+static size_t str_test_alloc_budget;
 #endif
 
 static const char str_empty_buf[STR_NUL_BYTES] = {'\0'};
 
-static const char str_ascii_whitespace_bytes[] = {' ', '\t', '\n', '\r', '\f', '\v'};
+static const unsigned char str_ascii_whitespace_bytes[] = {0x20U, 0x09U, 0x0aU,
+                                                           0x0dU, 0x0cU, 0x0bU};
 
 static const str_status_name_t str_status_names[] = {
     {.status = STR_OK, .name = "STR_OK"},
@@ -190,10 +192,10 @@ static void str_clear_content(str_t *string);
 #ifdef STR_TEST
 /* Consumes one test allocation allowance. Returns true at the injected failure point. */
 static bool str_test_consume_allocation_budget(void);
-#endif
 
 /* Claims one heap attempt. Returns false only when test injection rejects it. */
 static bool str_claim_heap_attempt(void);
+#endif
 
 /* Writes a newly owned malloc block to non-NULL out_buf on success.
  * STR_ERR_ALLOC leaves out_buf unchanged. */
@@ -327,7 +329,7 @@ static str_status_t str_grow_heap(str_t *string, size_t new_cap);
  * Fails with STR_ERR_ALLOC or STR_ERR_OVERFLOW. */
 static str_status_t str_ensure_capacity(str_t *string, size_t need);
 
-/* Locates non-NULL source relative to non-NULL string. One-past allocation returns cap. */
+/* Locates non-NULL source within non-NULL string's allocation. */
 static size_t str_find_allocation_offset(const str_t *string, const char *source);
 
 /* Validates a nonempty source span beginning at offset in string allocation.
@@ -340,10 +342,9 @@ static str_status_t str_validate_internal_source_span(const str_t *string,
 static str_status_t str_detect_overlap(const str_t *string, str_overlap_t *out_overlap,
                                        const char *source, size_t len);
 
-/* Prepares non-NULL string storage for request. Writes metadata to non-NULL out_overlap.
+/* Prepares storage for non-NULL request and rebases an internal source after growth.
  * Fails with STR_ERR_ARG, STR_ERR_ALLOC, or STR_ERR_OVERFLOW. */
-static str_status_t str_prepare_insert(str_t *string, str_overlap_t *out_overlap,
-                                       str_insert_request_t request);
+static str_status_t str_prepare_insert(str_t *string, str_insert_request_t *request);
 
 /* Prepares non-NULL string for request. Writes a borrowed source to non-NULL out_source.
  * Fails with STR_ERR_ARG, STR_ERR_ALLOC, or STR_ERR_OVERFLOW. */
@@ -376,8 +377,8 @@ static void str_replace_content(str_t *string, const char *source, size_t len);
 /* Appends a readable len-byte source to a non-NULL string with sufficient capacity. */
 static void str_append_content(str_t *string, const char *source, size_t len);
 
-/* Returns overlap source offset after opening the request gap. */
-static size_t str_adjust_source_offset(str_overlap_t overlap, str_insert_request_t request);
+/* Returns overlap source offset after opening an insertion gap. */
+static size_t str_adjust_source_offset(str_overlap_t overlap, const str_insert_request_t *request);
 
 /* Writes readable source at idx in non-NULL string without changing its length. */
 static void str_write_content(str_t *string, size_t idx, const char *source, size_t len);
@@ -459,7 +460,7 @@ static str_view_t str_make_empty_view(void);
 static str_status_t str_validate_find_arguments(const str_t *string, const size_t *out_idx,
                                                 const char *needle);
 
-/* Writes the requested match to non-NULL out_idx. Fails with STR_ERR_ARG. */
+/* Writes the requested match to non-NULL out_idx. Fails with STR_ERR_ARG or STR_ERR_OVERFLOW. */
 static str_status_t str_find_view_match(size_t *out_idx, str_view_t haystack, str_view_t needle,
                                         str_search_mode_t mode);
 
@@ -531,8 +532,8 @@ static size_t str_view_rfind_byte(str_view_t haystack, unsigned char byte);
 /* Returns the requested byte occurrence from valid nonempty haystack. */
 static size_t str_search_view_byte(str_view_t haystack, str_byte_search_t search);
 
-/* True for ASCII space, tab, CR, LF, FF, VT. */
-static bool str_is_ascii_whitespace(char byte);
+/* True for ASCII space, tab, CR, LF, FF, VT byte values. */
+static bool str_is_ascii_whitespace(unsigned char byte);
 
 /* Drops leading ASCII whitespace. */
 static str_view_t str_trim_view_left(str_view_t view);
@@ -736,7 +737,7 @@ str_status_t str_append_vfmt(str_t *string, const char *format, va_list argument
         return status;
     }
 
-    char stack_buf[STR_FORMAT_STACK_BYTES] = {0};
+    char stack_buf[STR_FORMAT_STACK_BYTES];
     size_t rendered_len = 0;
     str_format_destination_t stack_destination = {
         .buf = stack_buf,
@@ -853,17 +854,11 @@ str_status_t str_insert_n(str_t *string, size_t idx, const char *source, size_t 
     }
 
     str_insert_request_t request = {.idx = idx, .source = source, .len = len};
-    str_overlap_t overlap = {0};
-    status = str_prepare_insert(string, &overlap, request);
+    status = str_prepare_insert(string, &request);
     if (status != STR_OK) {
         return str_record_failure(string, status);
     }
 
-    const char *ready_source = source;
-    if (overlap.is_inside) {
-        ready_source = string->buf + str_adjust_source_offset(overlap, request);
-    }
-    request.source = ready_source;
     str_commit_insert(string, request);
     return STR_OK;
 }
@@ -1141,14 +1136,14 @@ str_status_t str_split_view(str_view_t source, str_split_out_t *split_output, ch
 #ifdef STR_TEST
 void str_test_fail_alloc_after(size_t success_count)
 {
+    str_test_alloc_failures_enabled = true;
     str_test_alloc_budget = success_count;
-    assert(str_test_alloc_budget == success_count);
 }
 
 void str_test_reset_alloc_failures(void)
 {
-    str_test_alloc_budget = SIZE_MAX;
-    assert(str_test_alloc_budget == SIZE_MAX);
+    str_test_alloc_failures_enabled = false;
+    str_test_alloc_budget = 0;
 }
 #endif
 
@@ -1184,8 +1179,6 @@ static void str_reset_state(str_t *string)
     string->len = 0;
     string->cap = 0;
     string->status = STR_OK;
-    assert(string->buf == NULL);
-    assert(string->len == 0);
 }
 
 static void str_transfer_state(str_t *destination, str_t *source)
@@ -1197,8 +1190,6 @@ static void str_transfer_state(str_t *destination, str_t *source)
     /* Direct assignment is reserved for this ownership-transfer leaf. */
     *destination = *source;
     str_reset_state(source);
-    assert(source->buf == NULL);
-    assert(source->cap == 0);
 }
 
 static bool str_is_owned(const str_t *string)
@@ -1212,7 +1203,6 @@ static void str_clear_failure(str_t *string)
 {
     assert(string != NULL);
     string->status = STR_OK;
-    assert(string->status == STR_OK);
 }
 
 static void str_clear_content(str_t *string)
@@ -1224,31 +1214,27 @@ static void str_clear_content(str_t *string)
         char *buf = string->buf;
         buf[0] = '\0';
     }
-    assert(string->len == 0);
 }
 
 #ifdef STR_TEST
 static bool str_test_consume_allocation_budget(void)
 {
-    if (str_test_alloc_budget == SIZE_MAX)
+    if (!str_test_alloc_failures_enabled) {
         return false;
-    if (str_test_alloc_budget == 0)
+    }
+    if (str_test_alloc_budget == 0) {
         return true;
-    assert(str_test_alloc_budget > 0);
+    }
     str_test_alloc_budget--;
     return false;
 }
-#endif
 
 static bool str_claim_heap_attempt(void)
 {
-#ifdef STR_TEST
     bool has_injected_failure = str_test_consume_allocation_budget();
     return !has_injected_failure;
-#else
-    return true;
-#endif
 }
+#endif
 
 static str_status_t str_call_malloc(char **out_buf, size_t bytes)
 {
@@ -1281,10 +1267,11 @@ static str_status_t str_allocate_heap(char **out_buf, size_t bytes)
 {
     assert(out_buf != NULL);
     assert(bytes > 0);
-    bool is_allowed = str_claim_heap_attempt();
-    if (!is_allowed) {
+#ifdef STR_TEST
+    if (!str_claim_heap_attempt()) {
         return str_allocation_error();
     }
+#endif
     return str_call_malloc(out_buf, bytes);
 }
 
@@ -1293,10 +1280,11 @@ static str_status_t str_resize_heap(char **out_buf, char *buf, size_t bytes)
     assert(out_buf != NULL);
     assert(buf != NULL);
     assert(bytes > 0);
-    bool is_allowed = str_claim_heap_attempt();
-    if (!is_allowed) {
+#ifdef STR_TEST
+    if (!str_claim_heap_attempt()) {
         return str_allocation_error();
     }
+#endif
     return str_call_realloc(out_buf, buf, bytes);
 }
 
@@ -1321,7 +1309,6 @@ static void str_set_failure(str_t *string, str_status_t status)
     assert(string != NULL);
     assert(status != STR_OK);
     string->status = status;
-    assert(string->status != STR_OK);
 }
 
 static char *str_take_owned_buffer(str_t *string)
@@ -1411,12 +1398,13 @@ static str_status_t str_measure_bounded_c_string(size_t *out_len, const char *so
     assert(out_len != NULL);
     assert(source != NULL);
 
-    const char *terminator = memchr(source, '\0', available);
-    if (terminator == NULL) {
-        return str_argument_error();
+    for (size_t idx = 0; idx < available; idx++) {
+        if (source[idx] == '\0') {
+            *out_len = idx;
+            return STR_OK;
+        }
     }
-    *out_len = (size_t)(terminator - source);
-    return STR_OK;
+    return str_argument_error();
 }
 
 static str_status_t str_measure_c_string_input(str_t *string, size_t *out_len, const char *source)
@@ -1697,8 +1685,6 @@ static str_status_t str_grow_heap(str_t *string, size_t new_cap)
     }
     string->buf = grown_buf;
     string->cap = new_cap;
-    assert(string->buf != NULL);
-    assert(string->cap == new_cap);
     return STR_OK;
 }
 
@@ -1729,9 +1715,6 @@ static size_t str_find_allocation_offset(const str_t *string, const char *source
         if (source == string->buf + offset) {
             return offset;
         }
-    }
-    if (source == string->buf + string->cap) {
-        return string->cap;
     }
     return STR_NPOS;
 }
@@ -1774,24 +1757,39 @@ static str_status_t str_detect_overlap(const str_t *string, str_overlap_t *out_o
     return STR_OK;
 }
 
-static str_status_t str_prepare_insert(str_t *string, str_overlap_t *out_overlap,
-                                       str_insert_request_t request)
+static str_status_t str_prepare_insert(str_t *string, str_insert_request_t *request)
 {
     assert(string != NULL);
-    assert(out_overlap != NULL);
-    assert(request.source != NULL);
-    assert(request.len > 0);
+    assert(request != NULL);
+    assert(request->source != NULL);
+    assert(request->len > 0);
 
     size_t need = 0;
-    str_status_t status = str_calculate_capacity(&need, string->len, request.len);
+    str_status_t status = str_calculate_capacity(&need, string->len, request->len);
     if (status != STR_OK) {
         return status;
     }
-    status = str_detect_overlap(string, out_overlap, request.source, request.len);
+
+    str_overlap_t overlap;
+    status = str_detect_overlap(string, &overlap, request->source, request->len);
     if (status != STR_OK) {
         return status;
     }
-    return str_ensure_capacity(string, need);
+
+    size_t adjusted_source_offset = 0;
+    if (overlap.is_inside) {
+        adjusted_source_offset = str_adjust_source_offset(overlap, request);
+    }
+
+    status = str_ensure_capacity(string, need);
+    if (status != STR_OK) {
+        return status;
+    }
+
+    if (overlap.is_inside) {
+        request->source = string->buf + adjusted_source_offset;
+    }
+    return STR_OK;
 }
 
 static str_status_t str_prepare_write(str_t *string, const char **out_source,
@@ -1808,7 +1806,7 @@ static str_status_t str_prepare_write(str_t *string, const char **out_source,
         return status;
     }
 
-    str_overlap_t overlap = {0};
+    str_overlap_t overlap;
     status = str_detect_overlap(string, &overlap, request.source, request.len);
     if (status != STR_OK) {
         return status;
@@ -1819,7 +1817,11 @@ static str_status_t str_prepare_write(str_t *string, const char **out_source,
         return status;
     }
 
-    *out_source = overlap.is_inside ? string->buf + overlap.idx : request.source;
+    if (overlap.is_inside) {
+        *out_source = string->buf + overlap.idx;
+    } else {
+        *out_source = request.source;
+    }
     return STR_OK;
 }
 
@@ -1933,12 +1935,13 @@ static void str_append_content(str_t *string, const char *source, size_t len)
     str_write_terminator(string);
 }
 
-static size_t str_adjust_source_offset(str_overlap_t overlap, str_insert_request_t request)
+static size_t str_adjust_source_offset(str_overlap_t overlap, const str_insert_request_t *request)
 {
     assert(overlap.is_inside);
-    assert(request.len > 0);
-    if (overlap.idx >= request.idx) {
-        return overlap.idx + request.len;
+    assert(request != NULL);
+    assert(request->len > 0);
+    if (overlap.idx >= request->idx) {
+        return overlap.idx + request->len;
     }
     return overlap.idx;
 }
@@ -1965,7 +1968,6 @@ static void str_commit_insert(str_t *string, str_insert_request_t request)
     str_move_bytes(string->buf + request.idx, request.source, request.len);
     string->len += request.len;
     str_write_terminator(string);
-    assert(string->buf[string->len] == '\0');
 }
 
 static void str_close_gap(str_t *string, size_t idx, size_t len)
@@ -2035,8 +2037,6 @@ static str_status_t str_shrink_heap(str_t *string, size_t exact_cap)
     }
     string->buf = shrunk_buf;
     string->cap = exact_cap;
-    assert(string->buf != NULL);
-    assert(string->cap == exact_cap);
     return STR_OK;
 }
 
@@ -2078,8 +2078,6 @@ static void str_release_staged_view(str_staged_view_t *staged)
     str_release_heap(staged->owned_buf);
     staged->view = str_make_empty_view();
     staged->owned_buf = NULL;
-    assert(staged->view.len == 0);
-    assert(staged->owned_buf == NULL);
 }
 
 static void str_commit_replacement(str_t *string, size_t idx, size_t remove_len,
@@ -2310,6 +2308,9 @@ static str_status_t str_find_view_match(size_t *out_idx, str_view_t haystack, st
     status = str_validate_view(needle);
     if (status != STR_OK) {
         return status;
+    }
+    if (mode == STR_SEARCH_LAST && needle.len == 0 && haystack.len == STR_NPOS) {
+        return str_overflow_error();
     }
 
     *out_idx = str_locate_view_match(haystack, needle, mode);
@@ -2606,11 +2607,12 @@ static size_t str_view_find_byte(str_view_t haystack, unsigned char byte)
     assert(haystack.ptr != NULL);
     assert(haystack.len > 0);
 
-    const char *match = memchr(haystack.ptr, (int)byte, haystack.len);
-    if (match == NULL) {
-        return STR_NPOS;
+    for (size_t idx = 0; idx < haystack.len; idx++) {
+        if ((unsigned char)haystack.ptr[idx] == byte) {
+            return idx;
+        }
     }
-    return (size_t)(match - haystack.ptr);
+    return STR_NPOS;
 }
 
 static size_t str_view_rfind_byte(str_view_t haystack, unsigned char byte)
@@ -2638,7 +2640,7 @@ static size_t str_search_view_byte(str_view_t haystack, str_byte_search_t search
     return str_view_rfind_byte(haystack, search.byte);
 }
 
-static bool str_is_ascii_whitespace(char byte)
+static bool str_is_ascii_whitespace(unsigned char byte)
 {
     size_t whitespace_count =
         sizeof(str_ascii_whitespace_bytes) / sizeof(str_ascii_whitespace_bytes[0]);
@@ -2653,7 +2655,7 @@ static bool str_is_ascii_whitespace(char byte)
 static str_view_t str_trim_view_left(str_view_t view)
 {
     assert(str_view_is_valid(view));
-    while (view.len > 0 && str_is_ascii_whitespace(view.ptr[0])) {
+    while (view.len > 0 && str_is_ascii_whitespace((unsigned char)view.ptr[0])) {
         view.ptr++;
         view.len--;
     }
@@ -2663,7 +2665,7 @@ static str_view_t str_trim_view_left(str_view_t view)
 static str_view_t str_trim_view_right(str_view_t view)
 {
     assert(str_view_is_valid(view));
-    while (view.len > 0 && str_is_ascii_whitespace(view.ptr[view.len - 1])) {
+    while (view.len > 0 && str_is_ascii_whitespace((unsigned char)view.ptr[view.len - 1])) {
         view.len--;
     }
     return view;
@@ -2714,11 +2716,18 @@ static str_status_t str_write_split_parts(str_split_out_t *split_output, str_vie
 {
     assert(split_output != NULL);
     assert(str_view_is_valid(source));
-    if (source.len == SIZE_MAX) {
-        return str_overflow_error();
-    }
 
     const char *buffer = str_get_view_buffer(source);
+    if (source.len == SIZE_MAX) {
+        size_t idx = 0;
+        while (idx < source.len && buffer[idx] == separator) {
+            idx++;
+        }
+        if (idx == source.len) {
+            return str_overflow_error();
+        }
+    }
+
     size_t start = 0;
     size_t count = 0;
     str_split_cursor_t cursor = {.idx = 0, .separator = separator};
@@ -2736,6 +2745,6 @@ static str_status_t str_write_split_parts(str_split_out_t *split_output, str_vie
     count++;
     split_output->count = count;
     assert(split_output->count > 0);
-    assert(split_output->count <= source.len + (size_t)STR_NUL_BYTES);
+    assert(source.len == SIZE_MAX || split_output->count <= source.len + (size_t)STR_NUL_BYTES);
     return STR_OK;
 }

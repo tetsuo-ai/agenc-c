@@ -1,5 +1,5 @@
-#ifndef STR_H
-#define STR_H
+#ifndef AGENC_STR_H_INCLUDED
+#define AGENC_STR_H_INCLUDED
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -16,7 +16,7 @@ typedef enum {
     STR_ERR_ALLOC = -2,
     /* A requested span lies outside current content. */
     STR_ERR_RANGE = -3,
-    /* A size calculation cannot be represented by size_t. */
+    /* A size or index result cannot be represented by the API. */
     STR_ERR_OVERFLOW = -4,
     /* Formatted output could not be produced consistently. */
     STR_ERR_FMT = -5
@@ -55,7 +55,8 @@ typedef enum {
  * - cap == 0 implies buf == NULL and len == 0.
  * - cap > 0 implies buf != NULL, len < cap, and buf[len] == '\0'.
  *
- * Storage must be zero-initialized or passed to str_init exactly once before use.
+ * Initialize storage with STR_EMPTY, a C initializer such as {0}, or exactly one call to
+ * str_init before first use. Byte-wise zeroing is not a portable substitute for initialization.
  * Fields are caller-readable for stack allocation and diagnostics. Callers must not modify
  * them or copy this struct by assignment. Use str_copy or str_move.
  *
@@ -142,8 +143,8 @@ const char *str_status_name(str_status_t status);
 /*
  * Unless stated otherwise, mutators require a non-NULL initialized string. A NULL string returns
  * STR_ERR_ARG, with no object on which to record it. Existing sticky status propagates unchanged.
- * A borrowed source may begin in existing content or at its terminator, but it must not extend
- * into spare capacity.
+ * A nonempty borrowed source may begin in existing content or at its terminator, but it must not
+ * extend into spare capacity. A zero-length source pointer is not inspected.
  * Mutators accepting borrowed pointers may perform work proportional to current allocation
  * capacity to classify supported self-sources without nonportable pointer ordering.
  */
@@ -157,8 +158,9 @@ str_status_t str_set(str_t *string, const char *source);
 /*
  * Replaces non-NULL initialized string from len borrowed bytes at source.
  * NULL is valid for zero len.
- * A self-source may include the existing terminator, never spare capacity. Existing sticky status
- * propagates. STR_ERR_ARG, STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded on failure.
+ * A nonempty self-source may include the existing terminator, never spare capacity. Existing
+ * sticky status propagates. STR_ERR_ARG, STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded on
+ * failure.
  */
 str_status_t str_set_n(str_t *string, const char *source, size_t len);
 
@@ -176,8 +178,9 @@ str_status_t str_append(str_t *string, const char *source);
 
 /*
  * Appends len borrowed bytes at source to non-NULL initialized string. NULL is valid for zero len.
- * A self-source may include the existing terminator, never spare capacity. Existing sticky status
- * propagates. STR_ERR_ARG, STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded on failure.
+ * A nonempty self-source may include the existing terminator, never spare capacity. Existing
+ * sticky status propagates. STR_ERR_ARG, STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded on
+ * failure.
  */
 str_status_t str_append_n(str_t *string, const char *source, size_t len);
 
@@ -235,7 +238,7 @@ str_status_t str_resize(str_t *string, size_t len, char fill);
 
 /*
  * Inserts len borrowed bytes from source at idx in non-NULL initialized string. End idx appends.
- * NULL source is valid for zero len. A self-source may include the existing terminator,
+ * NULL source is valid for zero len. A nonempty self-source may include the existing terminator,
  * never spare capacity. STR_ERR_ARG, STR_ERR_RANGE, STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded.
  */
 str_status_t str_insert_n(str_t *string, size_t idx, const char *source, size_t len);
@@ -254,9 +257,9 @@ str_status_t str_remove(str_t *string, size_t idx, size_t len);
 
 /*
  * Replaces remove_len bytes at idx in non-NULL initialized string from borrowed replacement.
- * Replacement may borrow existing content through its terminator, never spare capacity. Failure
- * is atomic. Existing sticky status propagates. STR_ERR_ARG, STR_ERR_RANGE, STR_ERR_ALLOC, or
- * STR_ERR_OVERFLOW is recorded.
+ * A nonempty replacement may borrow existing content through its terminator, never spare
+ * capacity. Failure is atomic. Existing sticky status propagates. STR_ERR_ARG, STR_ERR_RANGE,
+ * STR_ERR_ALLOC, or STR_ERR_OVERFLOW is recorded.
  */
 str_status_t str_replace_view(str_t *string, size_t idx, size_t remove_len, str_view_t replacement);
 
@@ -352,8 +355,9 @@ bool str_view_ends_with(str_view_t value, str_view_t suffix);
 str_status_t str_view_find(str_view_t haystack, size_t *out_idx, str_view_t needle);
 
 /*
- * Writes the last needle index or STR_NPOS. Empty needle matches at haystack.len. Invalid borrowed
- * views or NULL out_idx returns STR_ERR_ARG without changing out_idx.
+ * Writes the last needle index or STR_NPOS. Empty needle matches at haystack.len. If that index is
+ * STR_NPOS, returns STR_ERR_OVERFLOW instead to preserve the missing-result sentinel. Invalid
+ * borrowed views or NULL out_idx returns STR_ERR_ARG. Failure leaves out_idx unchanged.
  */
 str_status_t str_view_rfind(str_view_t haystack, size_t *out_idx, str_view_t needle);
 
@@ -371,7 +375,8 @@ str_view_t str_view_trim(str_view_t view);
 str_status_t str_split_view(str_view_t source, str_split_out_t *split_output, char separator);
 
 #ifdef STR_TEST
-/* Test-only. Fails allocation attempts after success_count successful attempts. */
+/* Test-only process-global controls require external synchronization. */
+/* Fails allocation attempts after success_count successful attempts. */
 void str_test_fail_alloc_after(size_t success_count);
 
 /* Test-only. Restores normal allocation behavior. */
@@ -380,4 +385,4 @@ void str_test_reset_alloc_failures(void);
 
 #undef STR_PRINTF_LIKE
 
-#endif /* STR_H */
+#endif /* AGENC_STR_H_INCLUDED */

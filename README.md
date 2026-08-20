@@ -200,6 +200,7 @@ sanitizer target.
 | `make demo` | Build and run the public-API walkthrough |
 | `make test` | Run strict-warning, deterministic, exhaustive, and seeded tests |
 | `make asan` | Run the suite with AddressSanitizer and UndefinedBehaviorSanitizer |
+| `make iso` | Run the suite with the strictly conforming `STR_STRICT_ISO_OVERLAP` scan |
 | `make release` | Run an optimized `NDEBUG`/FORTIFY build |
 | `make format` | Check the repository's clang-format rules |
 | `make check` | Run formatting, test, sanitizer, and release checks |

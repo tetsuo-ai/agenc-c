@@ -145,8 +145,12 @@ const char *str_status_name(str_status_t status);
  * STR_ERR_ARG, with no object on which to record it. Existing sticky status propagates unchanged.
  * A nonempty borrowed source may begin in existing content or at its terminator, but it must not
  * extend into spare capacity. A zero-length source pointer is not inspected.
- * Mutators accepting borrowed pointers may perform work proportional to current allocation
- * capacity to classify supported self-sources without nonportable pointer ordering.
+ * Mutators accepting borrowed pointers classify supported self-sources in constant time by
+ * comparing pointer representations as uintptr_t. That relies on the implementation-defined
+ * pointer-to-integer mapping placing the bytes of one object at consecutive integer values,
+ * which every supported hosted target provides. Building with STR_STRICT_ISO_OVERLAP, or on a
+ * target without uintptr_t, selects a strictly conforming pointer-equality scan whose cost is
+ * proportional to current allocation capacity.
  */
 
 /*

@@ -1711,12 +1711,30 @@ static size_t str_find_allocation_offset(const str_t *string, const char *source
         return STR_NPOS;
     }
 
+#if defined(UINTPTR_MAX) && !defined(STR_STRICT_ISO_OVERLAP)
+    /*
+     * Deviation: pointer-to-integer conversion is implementation-defined. Every supported
+     * target maps the bytes of one object to consecutive integer values, so a subtraction in
+     * uintptr_t classifies source against the allocation in constant time. Unsigned wraparound
+     * sends an address below the buffer past cap. Build with STR_STRICT_ISO_OVERLAP to select
+     * the strictly conforming equality scan on a target without this mapping guarantee.
+     */
+    uintptr_t base = (uintptr_t)(const void *)string->buf;
+    uintptr_t addr = (uintptr_t)(const void *)source;
+    uintptr_t delta = addr - base;
+    if (delta < (uintptr_t)string->cap) {
+        return (size_t)delta;
+    }
+    return STR_NPOS;
+#else
+    /* Pointer equality against each allocation byte is defined for any valid pointer. */
     for (size_t offset = 0; offset < string->cap; offset++) {
         if (source == string->buf + offset) {
             return offset;
         }
     }
     return STR_NPOS;
+#endif
 }
 
 static str_status_t str_validate_internal_source_span(const str_t *string, str_internal_span_t span)

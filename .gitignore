@@ -1,5 +1,6 @@
 tests/test_str
 tests/test_str_asan
+tests/test_str_iso
 tests/test_str_release
 str_demo
 *.o

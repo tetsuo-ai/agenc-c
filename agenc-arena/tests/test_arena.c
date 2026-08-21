@@ -14,6 +14,15 @@
 #include "alloc.h"
 #include "arena.h"
 
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define TEST_HAS_ASAN 1
+#endif
+#endif
+#if !defined(TEST_HAS_ASAN) && defined(__SANITIZE_ADDRESS__)
+#define TEST_HAS_ASAN 1
+#endif
+
 enum { TEST_SMALL = 16, TEST_MEDIUM = 64, TEST_LARGE = 128, TEST_FILL_BYTE = 0x5C };
 
 static struct {
@@ -148,10 +157,10 @@ static void test_fixed_tiny_buffers(void)
     arena_init_fixed(&a, NULL, 64);
     EXPECT(arena_status(&a) == ARENA_ERR_ARG);
 
-    /* Sizes up to the worst-case overhead: always a valid arena; the
-     * real header cost can be smaller, so the allocation either
-     * succeeds cleanly or fails cleanly with ARENA_ERR_ALLOC. */
-    for (size = 1; size < ARENA_FIXED_OVERHEAD; size++) {
+    /* Sizes through the worst-case overhead boundary: always a valid
+     * arena; the real header cost can be smaller, so the allocation
+     * either succeeds cleanly or fails cleanly with ARENA_ERR_ALLOC. */
+    for (size = 1; size <= ARENA_FIXED_OVERHEAD + 1; size++) {
         arena_init_fixed(&a, storage, size);
         EXPECT(arena_ok(&a));
         ptr = arena_alloc(&a, 1);
@@ -465,6 +474,245 @@ static void test_realloc_fixed(void)
     arena_deinit(&a);
 }
 
+/*
+ * T3: seeded randomized op sequences. Every live allocation carries a
+ * fill pattern; after every op all live allocations verify their
+ * pattern, their alignment, and pairwise disjointness. Failures print
+ * the seed and the op index. Runs on a fixed arena in every build and
+ * on a tracked growing arena where the heap is allowed.
+ */
+
+enum { RAND_LIVE_MAX = 32, RAND_TEMP_MAX = 4, RAND_OPS = 2000, RAND_SIZE_MAX = 600 };
+
+struct rand_entry {
+    unsigned char *ptr;
+    size_t size;
+    size_t align;
+    unsigned char fill;
+    unsigned level;
+};
+
+static uint32_t test_rng_next(uint32_t *state)
+{
+    uint32_t value = *state;
+
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^= value << 5;
+    *state = value;
+    return value;
+}
+
+static void rand_fail(uint32_t seed, size_t op, const char *what)
+{
+    fprintf(stderr, "FAIL random ops: seed=0x%08x op=%zu: %s\n", (unsigned)seed, op, what);
+    abort();
+}
+
+static void rand_fill_entry(struct rand_entry *entry)
+{
+    size_t idx;
+
+    for (idx = 0; idx < entry->size; idx++) {
+        entry->ptr[idx] = (unsigned char)(entry->fill + (unsigned char)idx);
+    }
+}
+
+static void rand_verify_all(const struct rand_entry *live, size_t live_count, uint32_t seed,
+                            size_t op)
+{
+    size_t i;
+    size_t j;
+    size_t b;
+
+    for (i = 0; i < live_count; i++) {
+        size_t effective = live[i].align == 0 ? ARENA_DEFAULT_ALIGN : live[i].align;
+
+        if (!test_is_aligned(live[i].ptr, effective)) {
+            rand_fail(seed, op, "misaligned allocation");
+        }
+        for (b = 0; b < live[i].size; b++) {
+            if (live[i].ptr[b] != (unsigned char)(live[i].fill + (unsigned char)b)) {
+                rand_fail(seed, op, "fill pattern clobbered");
+            }
+        }
+    }
+    for (i = 0; i < live_count; i++) {
+        uintptr_t a_lo = (uintptr_t)live[i].ptr;
+        uintptr_t a_hi = a_lo + live[i].size;
+
+        for (j = i + 1; j < live_count; j++) {
+            uintptr_t b_lo = (uintptr_t)live[j].ptr;
+            uintptr_t b_hi = b_lo + live[j].size;
+
+            if (a_lo < b_hi && b_lo < a_hi) {
+                rand_fail(seed, op, "live allocations overlap");
+            }
+        }
+    }
+}
+
+static void rand_drop_level(struct rand_entry *live, size_t *live_count, unsigned depth)
+{
+    size_t idx = 0;
+
+    while (idx < *live_count) {
+        if (live[idx].level > depth) {
+            live[idx] = live[*live_count - 1];
+            *live_count -= 1;
+        } else {
+            idx++;
+        }
+    }
+}
+
+static void run_random_ops(arena_t *a, uint32_t seed)
+{
+    struct rand_entry live[RAND_LIVE_MAX];
+    size_t live_count = 0;
+    arena_temp_t temps[RAND_TEMP_MAX];
+    unsigned depth = 0;
+    unsigned char next_fill = 1;
+    alloc_t adapter = arena_allocator(a);
+    uint32_t rng = seed;
+    size_t op;
+
+    for (op = 0; op < RAND_OPS; op++) {
+        uint32_t roll = test_rng_next(&rng);
+        uint32_t detail = test_rng_next(&rng);
+        size_t size = 1 + (size_t)(detail % RAND_SIZE_MAX);
+        size_t align = (detail & 7u) == 0 ? 0 : (size_t)1 << ((detail >> 3) % 7u);
+
+        switch (roll % 8u) {
+        case 0:
+        case 1: { /* alloc, uninitialized */
+            unsigned char *ptr = arena_alloc_n(a, 1, size, align);
+
+            if (ptr == NULL) {
+                if (!arena_failed(a)) {
+                    rand_fail(seed, op, "NULL without a recorded status");
+                }
+                arena_clear_error(a);
+                break;
+            }
+            if (live_count < RAND_LIVE_MAX) {
+                live[live_count].ptr = ptr;
+                live[live_count].size = size;
+                live[live_count].align = align;
+                live[live_count].fill = next_fill++;
+                live[live_count].level = depth;
+                rand_fill_entry(&live[live_count]);
+                live_count++;
+            }
+            break;
+        }
+        case 2: { /* zeroed alloc, verified zero before filling */
+            unsigned char *ptr = arena_alloc_zeroed(a, size);
+            size_t b;
+
+            if (ptr == NULL) {
+                if (!arena_failed(a)) {
+                    rand_fail(seed, op, "NULL without a recorded status");
+                }
+                arena_clear_error(a);
+                break;
+            }
+            for (b = 0; b < size; b++) {
+                if (ptr[b] != 0) {
+                    rand_fail(seed, op, "zeroed allocation not zero");
+                }
+            }
+            if (live_count < RAND_LIVE_MAX) {
+                live[live_count].ptr = ptr;
+                live[live_count].size = size;
+                live[live_count].align = 0;
+                live[live_count].fill = next_fill++;
+                live[live_count].level = depth;
+                rand_fill_entry(&live[live_count]);
+                live_count++;
+            }
+            break;
+        }
+        case 3:
+        case 4: { /* realloc the newest in-scope entry */
+            size_t pick = live_count;
+            unsigned char *moved;
+            size_t verify;
+
+            while (pick > 0 && live[pick - 1].level != depth) {
+                pick--;
+            }
+            if (pick == 0) {
+                break;
+            }
+            pick--;
+            moved = arena_realloc(a, live[pick].ptr, live[pick].size, size, live[pick].align);
+            if (moved == NULL) {
+                if (!arena_failed(a)) {
+                    rand_fail(seed, op, "NULL without a recorded status");
+                }
+                arena_clear_error(a);
+                break; /* the old entry stays valid and verified */
+            }
+            verify = live[pick].size < size ? live[pick].size : size;
+            for (size_t b = 0; b < verify; b++) {
+                if (moved[b] != (unsigned char)(live[pick].fill + (unsigned char)b)) {
+                    rand_fail(seed, op, "realloc lost contents");
+                }
+            }
+            live[pick].ptr = moved;
+            live[pick].size = size;
+            live[pick].fill = next_fill++;
+            rand_fill_entry(&live[pick]);
+            break;
+        }
+        case 5: /* temp begin */
+            if (depth < RAND_TEMP_MAX) {
+                temps[depth] = arena_temp_begin(a);
+                depth++;
+            }
+            break;
+        case 6: /* temp end */
+            if (depth > 0) {
+                depth--;
+                rand_drop_level(live, &live_count, depth);
+                arena_temp_end(temps[depth]);
+            }
+            break;
+        default: /* adapter free of the newest entry when it is in scope */
+            if (live_count > 0 && live[live_count - 1].level == depth) {
+                struct rand_entry *entry = &live[live_count - 1];
+
+                alloc_free(&adapter, entry->ptr, entry->size, entry->align);
+                live_count--;
+            }
+            break;
+        }
+        rand_verify_all(live, live_count, seed, op);
+        if (arena_committed(a) != 0 && arena_used(a) > arena_committed(a)) {
+            rand_fail(seed, op, "used exceeds committed");
+        }
+        test_ctx.run++;
+    }
+    while (depth > 0) {
+        depth--;
+        rand_drop_level(live, &live_count, depth);
+        arena_temp_end(temps[depth]);
+        rand_verify_all(live, live_count, seed, op);
+    }
+}
+
+/* T3: the seeded property loop on a fixed arena. Heap-free. */
+static void test_random_ops_fixed(void)
+{
+    static _Alignas(max_align_t) unsigned char buffer[1 << 16];
+    arena_t a;
+
+    arena_init_fixed(&a, buffer, sizeof(buffer));
+    run_random_ops(&a, 0xC0FFEE01u);
+    arena_deinit(&a);
+}
+
 #if !defined(NDEBUG) && defined(__unix__)
 
 #include <signal.h>
@@ -543,6 +791,53 @@ static void test_temp_violation_death(void)
     expect_abort(violate_temp_after_reset);
     expect_abort(violate_temp_rollback);
 }
+
+#if defined(TEST_HAS_ASAN) && !defined(ARENA_TEST_FIXED_ONLY)
+
+/* T2: an actual dereference of rewound memory dies under ASan. The
+ * child exits nonzero (ASan's default) or dies by signal; either counts
+ * as death. */
+static void expect_nonzero_exit(void (*violation)(void))
+{
+    pid_t pid;
+    int status;
+
+    pid = fork();
+    EXPECT(pid >= 0);
+    if (pid == 0) {
+        FILE *sink = freopen("/dev/null", "w", stderr);
+
+        (void)sink;
+        violation();
+        _exit(0); /* surviving the violation is the failure */
+    }
+    status = 0;
+    EXPECT(waitpid(pid, &status, 0) == pid);
+    EXPECT(WIFSIGNALED(status) || (WIFEXITED(status) && WEXITSTATUS(status) != 0));
+}
+
+static void violate_use_after_rewind(void)
+{
+    arena_t a;
+    arena_temp_t temp;
+    volatile unsigned char *stale;
+
+    arena_init(&a, alloc_libc());
+    temp = arena_temp_begin(&a);
+    stale = arena_alloc(&a, TEST_MEDIUM);
+    if (stale == NULL) {
+        return; /* no allocation, no violation: the parent sees exit 0 */
+    }
+    arena_temp_end(temp);
+    stale[0] = 1; /* use after rewind: ASan must catch this */
+}
+
+static void test_use_after_rewind_death(void)
+{
+    expect_nonzero_exit(violate_use_after_rewind);
+}
+
+#endif /* TEST_HAS_ASAN && !ARENA_TEST_FIXED_ONLY */
 
 #endif /* !NDEBUG && __unix__ */
 
@@ -818,10 +1113,66 @@ static void oom_scenario_mixed(arena_t *a)
     (void)ARENA_NEW_N(a, long, 40);
 }
 
+static void oom_scenario_temp_cycles(arena_t *a)
+{
+    size_t cycle;
+
+    for (cycle = 0; cycle < 4; cycle++) {
+        arena_temp_t temp = arena_temp_begin(a);
+
+        (void)arena_alloc(a, 400);
+        (void)arena_alloc(a, 2000);
+        arena_temp_end(temp);
+    }
+    (void)arena_alloc(a, TEST_MEDIUM);
+}
+
+static void oom_scenario_realloc_chain(arena_t *a)
+{
+    void *ptr = arena_alloc(a, TEST_MEDIUM);
+    size_t sizes[] = {200, 900, 300, 4000};
+    size_t step;
+    size_t held = TEST_MEDIUM;
+
+    for (step = 0; step < sizeof(sizes) / sizeof(sizes[0]); step++) {
+        void *grown;
+
+        if (ptr == NULL) {
+            return;
+        }
+        grown = arena_realloc(a, ptr, held, sizes[step], 0);
+        if (grown == NULL) {
+            return; /* the old block stays valid; deinit reclaims it */
+        }
+        ptr = grown;
+        held = sizes[step];
+    }
+}
+
+static void oom_scenario_adapter(arena_t *a)
+{
+    alloc_t ad = arena_allocator(a);
+    void *first = alloc_alloc(&ad, 200, 0);
+    void *second = alloc_alloc(&ad, 100, 32);
+
+    if (first != NULL) {
+        first = alloc_realloc(&ad, first, 200, 800, 0);
+    }
+    if (second != NULL) {
+        alloc_free(&ad, second, 100, 32);
+    }
+    (void)alloc_alloc(&ad, 5000, 0);
+    if (first != NULL) {
+        alloc_free(&ad, first, 800, 0);
+    }
+}
+
 static void test_oom_loops(void)
 {
-    static const oom_scenario_fn scenarios[] = {oom_scenario_small, oom_scenario_growth,
-                                                oom_scenario_oversize, oom_scenario_mixed};
+    static const oom_scenario_fn scenarios[] = {
+        oom_scenario_small,  oom_scenario_growth,      oom_scenario_oversize,
+        oom_scenario_mixed,  oom_scenario_temp_cycles, oom_scenario_realloc_chain,
+        oom_scenario_adapter};
     static struct track_ctx t;
     arena_t a;
     size_t s;
@@ -1205,6 +1556,19 @@ static void test_parent_matrix(void)
     EXPECT(t.live_count == 0);
 }
 
+/* T3: the seeded property loop on a tracked growing arena. */
+static void test_random_ops_growing(void)
+{
+    static struct track_ctx t;
+    arena_t a;
+
+    memset(&t, 0, sizeof(t));
+    EXPECT(arena_init_sized(&a, track_allocator(&t), 256, 4096) == ARENA_OK);
+    run_random_ops(&a, 0x9E3779B9u);
+    arena_deinit(&a);
+    EXPECT(t.live_count == 0);
+}
+
 /* T6: the libc backend contract table. */
 static void test_alloc_libc_contract(void)
 {
@@ -1287,15 +1651,6 @@ static void test_alloc_libc_contract(void)
 }
 
 #endif /* ARENA_TEST_FIXED_ONLY */
-
-#if defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define TEST_HAS_ASAN 1
-#endif
-#endif
-#if !defined(TEST_HAS_ASAN) && defined(__SANITIZE_ADDRESS__)
-#define TEST_HAS_ASAN 1
-#endif
 
 #if defined(TEST_HAS_ASAN) && !defined(ARENA_TEST_FIXED_ONLY)
 
@@ -1385,8 +1740,12 @@ int main(void)
     test_fixed_reset();
     test_temp_scopes();
     test_realloc_fixed();
+    test_random_ops_fixed();
 #if !defined(NDEBUG) && defined(__unix__)
     test_temp_violation_death();
+#if defined(TEST_HAS_ASAN) && !defined(ARENA_TEST_FIXED_ONLY)
+    test_use_after_rewind_death();
+#endif
 #endif
 #ifndef ARENA_TEST_FIXED_ONLY
     test_alloc_libc_contract();
@@ -1401,6 +1760,7 @@ int main(void)
     test_arena_on_arena();
     test_alignment_with_misaligning_parent();
     test_parent_matrix();
+    test_random_ops_growing();
 #if defined(TEST_HAS_ASAN)
     test_asan_poisoning();
     test_asan_fixed_buffer_returns_clean();

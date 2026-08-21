@@ -66,8 +66,10 @@ T1 arithmetic guards (memory-corruption class):
   failures per SPEC 4.4; the runtime-condition ones must fail cleanly).
 - count * size overflow pairs around SIZE_MAX and PTRDIFF_MAX;
   header + size + (align - 1) combined overflow near the cap.
-- growth doubling saturation: force enough blocks that doubling would
-  overflow without the cap; assert the cap holds.
+- growth doubling saturation: drive allocation through enough blocks
+  that doubling reaches max_block, and assert every parent request stays
+  within the policy sizes (overflow past the cap is unreachable because
+  init validates max_block <= PTRDIFF_MAX).
 - fixed arena: buffer sizes 0, 1, ARENA_FIXED_OVERHEAD - 1, exactly
   ARENA_FIXED_OVERHEAD, ARENA_FIXED_OVERHEAD + 1; deliberately
   misaligned buffer starts (base + 1 through base + 15) with aligned
@@ -135,8 +137,9 @@ T6 interface conformance (both directions):
 - alloc_null: everything fails cleanly, xfree accepts NULL and non-NULL.
 - arena_allocator adapter: passes the same contract table; LIFO
   alloc/free pairs leave used unchanged; xfree of a non-last allocation
-  is a harmless no-op; using the adapter after arena_reset is exercised
-  only as a documented-violation death test.
+  or with a garbage size is a harmless no-op. The adapter itself stays
+  usable after arena_reset; the violation is using memory handed out
+  before the reset, covered by the T2 dereference death test.
 - vtable-caller correctness: the checked-arg allocator runs under the
   whole suite, proving the arena always passes exact old sizes and
   aligns to its parent.
@@ -274,3 +277,20 @@ stays a no-op under violations, and the libc backend honors the
 shrinks-never-fail promise by returning the old block when realloc
 refuses a shrink. Full matrix re-run green under gcc and clang
 (27278 checks), valgrind clean, analyzers clean, fuzz sanity clean.
+
+Addendum 2026-08-20, completeness audit: a promise-by-promise sweep of
+this document against the suite found seven gaps, all closed the same
+day. Added: the seeded randomized property loop (2000 ops per backend,
+fill-pattern survival, alignment, pairwise disjointness, seed printed on
+failure) on both a fixed and a tracked growing arena; the T2
+actual-dereference death test under ASan; the temp-cycle, realloc-chain,
+and arena-as-allocator OOM scenarios in the fail-Nth table; the
+budget-capped fuzz parent with exact sized-deallocation accounting and a
+leak assert; the exact ARENA_FIXED_OVERHEAD boundary sizes in T1; and a
+make analyze target so the analyzer runs are repeatable. Reworded to
+match reality: the T1 doubling-saturation description and the T6
+adapter-after-reset line (the adapter stays usable after reset; the
+violation is using pre-reset memory, covered by the T2 death test).
+Suite grew from 27278 to 32615 checks (heapless 2364); full matrix
+re-run green under gcc and clang, valgrind 0 errors, analyzers clean,
+fuzz sanity clean.

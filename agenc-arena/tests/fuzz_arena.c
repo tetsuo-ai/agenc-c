@@ -9,13 +9,15 @@
  * arena's statistics stay coherent. Runs under fuzzer,address,undefined
  * with arena poisoning active, so overlap and use-after-rewind are
  * directly observable. The first input byte selects the backend: fixed
- * buffer or growing with the libc parent.
+ * buffer, or growing with a budget-capped libc parent so runaway inputs
+ * hit clean refusals instead of the fuzzer's rss limit.
  */
 
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "alloc.h"
@@ -25,8 +27,58 @@ enum {
     FUZZ_MAX_LIVE = 64,
     FUZZ_MAX_TEMPS = 8,
     FUZZ_FIXED_BUFFER = 1 << 16,
-    FUZZ_MAX_TOTAL_OPS = 512
+    FUZZ_MAX_TOTAL_OPS = 512,
+    FUZZ_PARENT_BUDGET = 1 << 20
 };
+
+/* The growing backend's parent: libc with a hard budget, so runaway
+ * inputs hit clean refusals instead of the fuzzer's rss limit. Sized
+ * deallocation makes the accounting exact. */
+struct fuzz_parent {
+    size_t live;
+};
+
+static void *fuzz_parent_xalloc(void *ctx, size_t size, size_t align)
+{
+    struct fuzz_parent *parent = ctx;
+    void *ptr;
+
+    (void)align;
+    if (size == 0 || size > (size_t)FUZZ_PARENT_BUDGET - parent->live) {
+        return NULL;
+    }
+    ptr = malloc(size);
+    if (ptr != NULL) {
+        parent->live += size;
+    }
+    return ptr;
+}
+
+static void *fuzz_parent_xrealloc(void *ctx, void *ptr, size_t old_size, size_t new_size,
+                                  size_t align)
+{
+    (void)ctx;
+    (void)ptr;
+    (void)old_size;
+    (void)new_size;
+    (void)align;
+    /* The arena never reallocs parent blocks. */
+    assert(0);
+    return NULL;
+}
+
+static void fuzz_parent_xfree(void *ctx, void *ptr, size_t size, size_t align)
+{
+    struct fuzz_parent *parent = ctx;
+
+    (void)align;
+    if (ptr == NULL) {
+        return;
+    }
+    assert(parent->live >= size);
+    parent->live -= size;
+    free(ptr);
+}
 
 struct fuzz_entry {
     unsigned char *ptr;
@@ -169,6 +221,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     static _Alignas(max_align_t) unsigned char fixed_buffer[FUZZ_FIXED_BUFFER];
     struct fuzz_input in = {data, size, 0};
     struct fuzz_model m;
+    struct fuzz_parent parent = {0};
+    alloc_t parent_alloc = {&parent, fuzz_parent_xalloc, fuzz_parent_xrealloc, fuzz_parent_xfree};
     arena_t a;
     alloc_t adapter;
     bool fixed;
@@ -186,7 +240,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (fixed) {
         arena_init_fixed(&a, fixed_buffer, sizeof(fixed_buffer));
     } else {
-        assert(arena_init_sized(&a, alloc_libc(), 256, 8192) == ARENA_OK);
+        assert(arena_init_sized(&a, parent_alloc, 256, 8192) == ARENA_OK);
     }
     adapter = arena_allocator(&a);
 
@@ -324,5 +378,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         fuzz_verify_all(&m, &a);
     }
     arena_deinit(&a);
+    assert(parent.live == 0); /* every parent block came back */
     return 0;
 }

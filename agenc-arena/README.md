@@ -196,6 +196,7 @@ fuzzer), and valgrind are needed for the corresponding targets.
 | `make heapless` | Run the fixed-buffer suite with no heap use |
 | `make fuzz` | Build and run the libFuzzer op-sequence harness |
 | `make valgrind` | Run the suite under memcheck with mempool annotations |
+| `make analyze` | Run gcc -fanalyzer and the clang static analyzer |
 | `make format` | Check the repository's clang-format rules |
 | `make check` | Format, demo build, test, asan, iso, release, heapless |
 

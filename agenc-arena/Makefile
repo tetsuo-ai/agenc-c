@@ -22,7 +22,7 @@ DEMO_SRC = main.c
 DEMO_BIN = arena_demo
 FORMAT_FILES = $(wildcard include/*.h src/*.c tests/*.c main.c)
 
-.PHONY: test asan iso release heapless fuzz valgrind format check demo clean
+.PHONY: test asan iso release heapless fuzz valgrind analyze format check demo clean
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)
@@ -79,6 +79,10 @@ demo: $(DEMO_BIN)
 
 $(DEMO_BIN): $(DEMO_SRC) $(SRC) $(HDRS) Makefile
 	$(ARENA_COMPILE) $(LDFLAGS) -o $@ $(DEMO_SRC) $(SRC) $(LDLIBS)
+
+analyze:
+	gcc -fanalyzer $(ARENA_CPPFLAGS) $(ARENA_CFLAGS) -c $(SRC) -o /dev/null
+	$(CLANG) --analyze $(ARENA_CPPFLAGS) -std=c11 $(SRC) -o /dev/null
 
 format:
 	$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)

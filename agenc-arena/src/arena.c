@@ -1,5 +1,6 @@
 /* arena.c: allocator interface backends and the arena region allocator. */
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,131 +9,14 @@
 #include "arena.h"
 
 /*
- * The libc backend. align above _Alignof(max_align_t) is refused instead
- * of routed through aligned_alloc: MSVC does not provide aligned_alloc,
- * and a header-free pairing of over-aligned allocation with plain free
- * is not portable. Size caps follow the family rule that no single
- * allocation exceeds PTRDIFF_MAX.
- */
-
-static void *alloc_libc_xalloc(void *ctx, size_t size, size_t align)
-{
-    (void)ctx;
-    if (size == 0 || size > (size_t)PTRDIFF_MAX) {
-        return NULL;
-    }
-    if (align > _Alignof(max_align_t)) {
-        return NULL;
-    }
-    return malloc(size);
-}
-
-static void *alloc_libc_xrealloc(void *ctx, void *ptr, size_t old_size, size_t new_size,
-                                 size_t align)
-{
-    (void)ctx;
-    (void)old_size;
-    if (new_size == 0 || new_size > (size_t)PTRDIFF_MAX) {
-        return NULL;
-    }
-    if (align > _Alignof(max_align_t)) {
-        return NULL;
-    }
-    if (ptr == NULL) {
-        return malloc(new_size);
-    }
-    return realloc(ptr, new_size);
-}
-
-static void alloc_libc_xfree(void *ctx, void *ptr, size_t size, size_t align)
-{
-    (void)ctx;
-    (void)size;
-    (void)align;
-    free(ptr);
-}
-
-alloc_t alloc_libc(void)
-{
-    alloc_t backend = {NULL, alloc_libc_xalloc, alloc_libc_xrealloc, alloc_libc_xfree};
-
-    return backend;
-}
-
-/* The always-failing backend. */
-
-static void *alloc_null_xalloc(void *ctx, size_t size, size_t align)
-{
-    (void)ctx;
-    (void)size;
-    (void)align;
-    return NULL;
-}
-
-static void *alloc_null_xrealloc(void *ctx, void *ptr, size_t old_size, size_t new_size,
-                                 size_t align)
-{
-    (void)ctx;
-    (void)ptr;
-    (void)old_size;
-    (void)new_size;
-    (void)align;
-    return NULL;
-}
-
-static void alloc_null_xfree(void *ctx, void *ptr, size_t size, size_t align)
-{
-    (void)ctx;
-    (void)ptr;
-    (void)size;
-    (void)align;
-}
-
-alloc_t alloc_null(void)
-{
-    alloc_t backend = {NULL, alloc_null_xalloc, alloc_null_xrealloc, alloc_null_xfree};
-
-    return backend;
-}
-
-/*
- * Arena internals.
- *
- * Blocks chain newest-first through the link field: the allocation chain
- * reads it as "previous (older) block", the free list reads it as "next
- * free block". Capacity checks run on integers before any pointer is
- * formed, and alignment padding is computed as an integer and applied by
- * advancing the cursor pointer, never by materializing a pointer from a
- * computed integer.
- */
-
-enum { ARENA_FLAG_FIXED = 1 };
-
-struct arena_block {
-    struct arena_block *link;
-    size_t cap;  /* usable data bytes after the header */
-    size_t used; /* data bytes consumed */
-    unsigned oversize;
-};
-
-/* Data begins at the header size rounded up to max_align_t, so a block
- * from a conforming parent starts its data at the default alignment. */
-#define ARENA_BLOCK_HDR                                                                            \
-    ((sizeof(struct arena_block) + _Alignof(max_align_t) - 1) / _Alignof(max_align_t) *            \
-     _Alignof(max_align_t))
-
-_Static_assert(ARENA_BLOCK_HDR + _Alignof(struct arena_block) - 1 <= ARENA_FIXED_OVERHEAD,
-               "fixed-arena bookkeeping exceeds ARENA_FIXED_OVERHEAD");
-
-/*
  * Checking-build instrumentation. ASan and MSan hooks engage under
  * feature detection; Valgrind mempool annotation is opt-in with
  * ARENA_ENABLE_VALGRIND (valgrind headers come from the include path,
  * never vendored); ARENA_DISABLE_SANITIZER_HOOKS turns everything off.
  * Debug fills run only when no tool tracks the memory, because writing
  * a fill pattern into poisoned or unaddressable bytes would itself be a
- * report. All fills happen while the bytes are still addressable, then
- * the region is marked dead.
+ * report. Fills always happen while the bytes are still addressable,
+ * then the region is marked dead.
  */
 
 #if !defined(ARENA_DISABLE_SANITIZER_HOOKS)
@@ -206,184 +90,141 @@ _Static_assert(ARENA_BLOCK_HDR + _Alignof(struct arena_block) - 1 <= ARENA_FIXED
 #define ARENA_REDZONE ((size_t)0)
 #endif
 
-static unsigned char *arena_block_data(struct arena_block *block)
-{
-    return (unsigned char *)(void *)block + ARENA_BLOCK_HDR;
-}
+/*
+ * Blocks chain newest-first through the link field: the allocation chain
+ * reads it as "previous (older) block", the free list reads it as "next
+ * free block". Capacity checks run on integers before any pointer is
+ * formed, and alignment padding is computed as an integer and applied by
+ * advancing the cursor pointer, never by materializing a pointer from a
+ * computed integer.
+ */
 
-static bool arena_align_valid(size_t align)
-{
-    return (align & (align - 1)) == 0 && align <= ARENA_MAX_ALIGN;
-}
+enum { ARENA_FLAG_FIXED = 1 };
 
-static size_t arena_align_effective(size_t align)
-{
-    size_t effective = align == 0 ? ARENA_DEFAULT_ALIGN : align;
+struct arena_block {
+    struct arena_block *link;
+    size_t cap;  /* usable data bytes after the header */
+    size_t used; /* data bytes consumed */
+    unsigned oversize;
+};
 
-#if defined(ARENA_HAS_ASAN)
-    if (effective < 8) {
-        effective = 8;
-    }
-#endif
-    return effective;
-}
+/* Data begins at the header size rounded up to max_align_t, so a block
+ * from a conforming parent starts its data at the default alignment. */
+#define ARENA_BLOCK_HDR                                                                            \
+    ((sizeof(struct arena_block) + _Alignof(max_align_t) - 1) / _Alignof(max_align_t) *            \
+     _Alignof(max_align_t))
+
+_Static_assert(ARENA_BLOCK_HDR + _Alignof(struct arena_block) - 1 <= ARENA_FIXED_OVERHEAD,
+               "fixed-arena bookkeeping exceeds ARENA_FIXED_OVERHEAD");
+
+/* The libc backend. Over-aligned requests are refused, never mis-served. */
+static void *alloc_libc_xalloc(void *ctx, size_t size, size_t align);
+static void *alloc_libc_xrealloc(void *ctx, void *ptr, size_t old_size, size_t new_size,
+                                 size_t align);
+static void alloc_libc_xfree(void *ctx, void *ptr, size_t size, size_t align);
+
+/* The always-failing backend. */
+static void *alloc_null_xalloc(void *ctx, size_t size, size_t align);
+static void *alloc_null_xrealloc(void *ctx, void *ptr, size_t old_size, size_t new_size,
+                                 size_t align);
+static void alloc_null_xfree(void *ctx, void *ptr, size_t size, size_t align);
+
+/* block is a live block header. */
+static unsigned char *arena_block_data(struct arena_block *block);
+
+/* True for 0 and for powers of two up to ARENA_MAX_ALIGN. */
+static bool arena_align_valid(size_t align);
+
+/* align passed arena_align_valid. Resolves 0 and the ASan floor. */
+static size_t arena_align_effective(size_t align);
 
 /* Records the first failure; an existing sticky status is preserved. */
-static void arena_fail(arena_t *a, arena_status_t status)
+static void arena_fail(arena_t *a, arena_status_t status);
+
+/* [ptr, ptr + size) was just carved from block: exact-size unpoison,
+ * debug fill, MSan mark, mempool chunk registration, in that order. */
+static void arena_mark_live(struct arena_block *block, unsigned char *ptr, size_t size);
+
+/* Marks [keep, dead_end) of block's data dead: debug fill while still
+ * addressable, then poison, then addressability. */
+static void arena_mark_dead(struct arena_block *block, size_t keep, size_t dead_end);
+
+/* Rewinds block to empty, dead-marking its whole used range. */
+static void arena_rewind_block(struct arena_block *block);
+
+/* Serves size bytes at align_eff from the current block, or returns
+ * NULL without side effects when it does not fit. */
+static void *arena_try_bump(arena_t *a, size_t size, size_t align_eff);
+
+/* Unlinks and returns the first free-list block with cap >= data_need,
+ * or NULL. The caller chains the block. */
+static struct arena_block *arena_take_free_block(arena_t *a, size_t data_need);
+
+/* Obtains a block holding data_need bytes from the parent: a normal
+ * block of next_block bytes (doubling to max_block) when it fits, else
+ * a dedicated exactly-sized oversize block. Records ARENA_ERR_ALLOC and
+ * returns NULL on refusal. The caller chains the block. */
+static struct arena_block *arena_new_block(arena_t *a, size_t data_need);
+
+/* The slow path behind arena_try_bump: acquires capacity and bumps.
+ * On failure nothing changes except the sticky status. */
+static void *arena_grow_and_bump(arena_t *a, size_t size, size_t align_eff);
+
+/* The shared front of every allocation entry point: sticky gate,
+ * argument validation, overflow guards, bump, grow. */
+static void *arena_alloc_impl(arena_t *a, size_t count, size_t size, size_t align);
+
+/* Moves a dead normal block onto the free list. Its mempool anchor
+ * stays alive for the block's whole lifetime; only the chunks drop. */
+static void arena_retire_block(arena_t *a, struct arena_block *block);
+
+/* Returns one block to the parent with the exact size and align of its
+ * acquisition. Never called for fixed arenas. */
+static void arena_release_block(arena_t *a, struct arena_block *block);
+
+/* Releases every block on a chain to the parent. */
+static void arena_release_chain(arena_t *a, struct arena_block *first);
+
+/* Pops blocks entered since stop became current: oversize blocks return
+ * to the parent, normal blocks retire to the free list. stop must still
+ * be on the chain; a missing stop is a stale-temp contract violation. */
+static void arena_pop_to_block(arena_t *a, struct arena_block *stop);
+
+/* True when [ptr, ptr + size) is the most recent live allocation, in
+ * the current block right at the cursor. The membership test runs in
+ * integer space: a relational pointer comparison against another
+ * block's data would be undefined. Writes ptr's block offset. */
+static bool arena_is_last_alloc(const arena_t *a, const void *ptr, size_t size, size_t *out_offset);
+
+/* Resizes ptr in place when it is the last allocation and the block can
+ * absorb the change. Returns NULL, with nothing changed, when the move
+ * path must run instead. */
+static void *arena_try_resize_last(arena_t *a, void *ptr, size_t old_size, size_t new_size);
+
+/* The realloc move path: allocate, copy min(old_size, new_size) bytes,
+ * abandon the old region. Failure records the status and leaves the old
+ * block valid. */
+static void *arena_realloc_move(arena_t *a, void *ptr, size_t old_size, size_t new_size,
+                                size_t align);
+
+/* The alloc_t adapter over an arena. */
+static void *arena_adapter_xalloc(void *ctx, size_t size, size_t align);
+static void *arena_adapter_xrealloc(void *ctx, void *ptr, size_t old_size, size_t new_size,
+                                    size_t align);
+static void arena_adapter_xfree(void *ctx, void *ptr, size_t size, size_t align);
+
+alloc_t alloc_libc(void)
 {
-    if (a->status == ARENA_OK) {
-        a->status = status;
-    }
+    alloc_t backend = {NULL, alloc_libc_xalloc, alloc_libc_xrealloc, alloc_libc_xfree};
+
+    return backend;
 }
 
-/* Marks [keep, dead_end) of a block's data dead: debug fill, poison,
- * and addressability, in that order. */
-static void arena_mark_dead(struct arena_block *block, size_t keep, size_t dead_end)
+alloc_t alloc_null(void)
 {
-    unsigned char *data = arena_block_data(block);
+    alloc_t backend = {NULL, alloc_null_xalloc, alloc_null_xrealloc, alloc_null_xfree};
 
-    if (dead_end <= keep) {
-        return;
-    }
-    ARENA_FILL_DEAD(data + keep, dead_end - keep);
-    ARENA_POISON(data + keep, dead_end - keep);
-    ARENA_VG_NOACCESS(data + keep, dead_end - keep);
-}
-
-static void *arena_try_bump(arena_t *a, size_t size, size_t align_eff)
-{
-    struct arena_block *block = a->current;
-    unsigned char *data;
-    unsigned char *cursor;
-    size_t pad;
-    size_t avail;
-    size_t total;
-
-    if (block == NULL) {
-        return NULL;
-    }
-    data = arena_block_data(block);
-    cursor = data + block->used;
-    pad = (size_t)(-(uintptr_t)cursor & (uintptr_t)(align_eff - 1));
-    avail = block->cap - block->used;
-    total = size + ARENA_REDZONE;
-    if (pad > avail || total > avail - pad) {
-        return NULL;
-    }
-    block->used += pad + total;
-    a->used += pad + total;
-    if (a->used > a->high_water) {
-        a->high_water = a->used;
-    }
-    ARENA_UNPOISON(cursor + pad, size); /* exact user size, never padded */
-    ARENA_FILL_ALLOC(cursor + pad, size);
-    ARENA_MSAN_ALLOCATED(cursor + pad, size);
-    ARENA_VG_ALLOC(block, cursor + pad, size);
-    return cursor + pad;
-}
-
-/*
- * Acquires capacity for one allocation that the current block cannot
- * serve: reuses a retained free-list block when one is big enough,
- * otherwise requests a normal block of next_block bytes (doubling to
- * max_block) or a dedicated exactly-sized oversize block. On parent
- * refusal nothing changes except the sticky status.
- */
-static void *arena_grow_and_bump(arena_t *a, size_t size, size_t align_eff)
-{
-    struct arena_block *block;
-    struct arena_block **linkp;
-    size_t data_need;
-    size_t block_size;
-    size_t target;
-    void *ptr;
-
-    if ((a->flags & ARENA_FLAG_FIXED) != 0) {
-        arena_fail(a, ARENA_ERR_ALLOC);
-        return NULL;
-    }
-    /* Worst-case data bytes: request plus alignment slack plus redzone.
-     * size is capped at PTRDIFF_MAX and align_eff at ARENA_MAX_ALIGN, so
-     * this sum cannot wrap size_t. */
-    data_need = size + (align_eff - 1) + ARENA_REDZONE;
-    if (data_need > (size_t)PTRDIFF_MAX - ARENA_BLOCK_HDR) {
-        arena_fail(a, ARENA_ERR_OVERFLOW);
-        return NULL;
-    }
-
-    /* First fit over retained blocks before asking the parent. Retained
-     * data is already dead-marked; only the pool anchor returns. */
-    for (linkp = &a->free_blocks; *linkp != NULL; linkp = &(*linkp)->link) {
-        if ((*linkp)->cap >= data_need) {
-            block = *linkp;
-            *linkp = block->link;
-            block->link = a->current;
-            block->used = 0;
-            a->current = block;
-            ptr = arena_try_bump(a, size, align_eff);
-            assert(ptr != NULL); /* cap covers worst-case padding */
-            return ptr;
-        }
-    }
-
-    target = a->next_block;
-    if (ARENA_BLOCK_HDR + data_need <= target) {
-        block_size = target;
-    } else {
-        block_size = ARENA_BLOCK_HDR + data_need;
-    }
-    block = alloc_alloc(&a->parent, block_size, 0);
-    if (block == NULL) {
-        arena_fail(a, ARENA_ERR_ALLOC);
-        return NULL;
-    }
-    block->link = a->current;
-    block->cap = block_size - ARENA_BLOCK_HDR;
-    block->used = 0;
-    block->oversize = (unsigned)(block_size != target);
-    if (block->oversize == 0) {
-        a->next_block = target * 2 > a->max_block ? a->max_block : target * 2;
-    }
-    a->committed += block_size;
-    a->current = block;
-    ARENA_VG_CREATE(block);
-    ARENA_POISON(arena_block_data(block), block->cap);
-    ARENA_VG_NOACCESS(arena_block_data(block), block->cap);
-    ptr = arena_try_bump(a, size, align_eff);
-    assert(ptr != NULL); /* cap covers worst-case padding */
-    return ptr;
-}
-
-static void *arena_alloc_impl(arena_t *a, size_t count, size_t size, size_t align)
-{
-    size_t align_eff;
-    size_t total;
-    void *ptr;
-
-    if (a == NULL) {
-        return NULL;
-    }
-    if (a->status != ARENA_OK) {
-        return NULL;
-    }
-    if (!arena_align_valid(align)) {
-        arena_fail(a, ARENA_ERR_ARG);
-        return NULL;
-    }
-    if (count == 0 || size == 0) {
-        return NULL;
-    }
-    if (count > (size_t)PTRDIFF_MAX / size) {
-        arena_fail(a, ARENA_ERR_OVERFLOW);
-        return NULL;
-    }
-    total = count * size;
-    align_eff = arena_align_effective(align);
-    ptr = arena_try_bump(a, total, align_eff);
-    if (ptr != NULL) {
-        return ptr;
-    }
-    return arena_grow_and_bump(a, total, align_eff);
+    return backend;
 }
 
 void arena_init(arena_t *a, alloc_t parent)
@@ -465,33 +306,8 @@ void arena_init_fixed(arena_t *a, void *buffer, size_t size)
     ARENA_VG_NOACCESS(arena_block_data(block), block->cap);
 }
 
-/* Moves a dead normal block onto the free list. Its mempool anchor
- * stays alive for the block's whole lifetime; only the chunks drop. */
-static void arena_retire_block(arena_t *a, struct arena_block *block)
-{
-    arena_mark_dead(block, 0, block->used);
-    ARENA_VG_TRIM(block, arena_block_data(block), 0);
-    block->used = 0;
-    block->link = a->free_blocks;
-    a->free_blocks = block;
-}
-
-/* Returns one block to the parent with the exact size and align of its
- * acquisition. Never called for fixed arenas. */
-static void arena_release_block(arena_t *a, struct arena_block *block)
-{
-    size_t block_size = ARENA_BLOCK_HDR + block->cap;
-
-    ARENA_FILL_DEAD(arena_block_data(block), block->used);
-    ARENA_VG_DESTROY(block);
-    a->committed -= block_size;
-    alloc_free(&a->parent, block, block_size, 0);
-}
-
 void arena_deinit(arena_t *a)
 {
-    struct arena_block *block;
-    struct arena_block *next;
     alloc_t parent;
     unsigned generation;
 
@@ -501,14 +317,8 @@ void arena_deinit(arena_t *a)
     parent = a->parent;
     generation = a->generation + 1u;
     if ((a->flags & ARENA_FLAG_FIXED) == 0) {
-        for (block = a->current; block != NULL; block = next) {
-            next = block->link;
-            arena_release_block(a, block);
-        }
-        for (block = a->free_blocks; block != NULL; block = next) {
-            next = block->link;
-            arena_release_block(a, block);
-        }
+        arena_release_chain(a, a->current);
+        arena_release_chain(a, a->free_blocks);
     } else if (a->current != NULL) {
         /* The buffer returns to its owner: fully addressable again, with
          * unspecified contents. */
@@ -518,6 +328,60 @@ void arena_deinit(arena_t *a)
     }
     arena_init(a, parent);
     a->generation = generation;
+}
+
+void arena_reset(arena_t *a)
+{
+    struct arena_block *block;
+    struct arena_block *next;
+    struct arena_block *oldest_normal;
+
+    if (a == NULL) {
+        return;
+    }
+    if ((a->flags & ARENA_FLAG_FIXED) != 0) {
+        if (a->current != NULL) {
+            arena_rewind_block(a->current);
+        }
+    } else {
+        /* The oldest normal block stays current; other normal blocks
+         * move to the free list; oversize blocks return to the parent. */
+        oldest_normal = NULL;
+        for (block = a->current; block != NULL; block = block->link) {
+            if (block->oversize == 0) {
+                oldest_normal = block;
+            }
+        }
+        for (block = a->current; block != NULL; block = next) {
+            next = block->link;
+            if (block == oldest_normal) {
+                continue;
+            }
+            if (block->oversize != 0) {
+                arena_release_block(a, block);
+            } else {
+                arena_retire_block(a, block);
+            }
+        }
+        if (oldest_normal != NULL) {
+            arena_rewind_block(oldest_normal);
+            oldest_normal->link = NULL;
+        }
+        a->current = oldest_normal;
+    }
+    a->used = 0;
+    a->temp_depth = 0;
+    a->generation += 1u;
+    a->status = ARENA_OK;
+}
+
+void arena_trim(arena_t *a)
+{
+    if (a == NULL || (a->flags & ARENA_FLAG_FIXED) != 0) {
+        return;
+    }
+    arena_release_chain(a, a->free_blocks);
+    a->free_blocks = NULL;
 }
 
 void arena_clear_error(arena_t *a)
@@ -578,6 +442,99 @@ void *arena_memdup(arena_t *a, const void *src, size_t size)
     return ptr;
 }
 
+void *arena_realloc(arena_t *a, void *ptr, size_t old_size, size_t new_size, size_t align)
+{
+    void *resized;
+
+    if (a == NULL) {
+        return NULL;
+    }
+    if (a->status != ARENA_OK) {
+        return NULL;
+    }
+    if (!arena_align_valid(align)) {
+        arena_fail(a, ARENA_ERR_ARG);
+        return NULL;
+    }
+    if (new_size == 0) {
+        /* Freeing through realloc is forbidden by the interface; refuse
+         * with a recorded status instead of inheriting realloc(p, 0)
+         * divergence. */
+        arena_fail(a, ARENA_ERR_ARG);
+        return NULL;
+    }
+    assert(ptr != NULL || old_size == 0);
+    if (ptr == NULL) {
+        return arena_alloc_impl(a, 1, new_size, align);
+    }
+    if (new_size > (size_t)PTRDIFF_MAX) {
+        arena_fail(a, ARENA_ERR_OVERFLOW);
+        return NULL;
+    }
+    resized = arena_try_resize_last(a, ptr, old_size, new_size);
+    if (resized != NULL) {
+        return resized;
+    }
+    return arena_realloc_move(a, ptr, old_size, new_size, align);
+}
+
+arena_temp_t arena_temp_begin(arena_t *a)
+{
+    arena_temp_t temp;
+
+    temp.arena = a;
+    temp.block = NULL;
+    temp.block_used = 0;
+    temp.used = 0;
+    temp.generation = 0;
+    temp.depth = 0;
+    if (a == NULL) {
+        return temp;
+    }
+    a->temp_depth += 1u;
+    temp.block = a->current;
+    temp.block_used = a->current != NULL ? a->current->used : 0;
+    temp.used = a->used;
+    temp.generation = a->generation;
+    temp.depth = a->temp_depth;
+    return temp;
+}
+
+void arena_temp_end(arena_temp_t temp)
+{
+    arena_t *a = temp.arena;
+    struct arena_block *block;
+
+    if (a == NULL) {
+        return;
+    }
+    /* Stale temps are contract violations; these checks are the debug
+     * detection the header promises. */
+    assert(temp.generation == a->generation);
+    assert(temp.depth == a->temp_depth);
+    arena_pop_to_block(a, temp.block);
+    block = a->current;
+    if (block != NULL) {
+        arena_mark_dead(block, temp.block_used, block->used);
+        ARENA_VG_TRIM(block, arena_block_data(block), temp.block_used);
+        block->used = temp.block_used;
+    }
+    a->used = temp.used;
+    if (a->temp_depth > 0) {
+        a->temp_depth -= 1u;
+    }
+}
+
+alloc_t arena_allocator(arena_t *a)
+{
+    alloc_t backend = {a, arena_adapter_xalloc, arena_adapter_xrealloc, arena_adapter_xfree};
+
+    if (a == NULL) {
+        return alloc_null();
+    }
+    return backend;
+}
+
 const char *arena_status_name(arena_status_t status)
 {
     switch (status) {
@@ -624,137 +581,239 @@ size_t arena_high_water(const arena_t *a)
     return a == NULL ? 0 : a->high_water;
 }
 
-void arena_reset(arena_t *a)
+static void *alloc_libc_xalloc(void *ctx, size_t size, size_t align)
 {
-    struct arena_block *block;
-    struct arena_block *next;
-    struct arena_block *oldest_normal;
+    (void)ctx;
+    if (size == 0 || size > (size_t)PTRDIFF_MAX) {
+        return NULL;
+    }
+    if (align > _Alignof(max_align_t)) {
+        return NULL;
+    }
+    return malloc(size);
+}
 
-    if (a == NULL) {
+static void *alloc_libc_xrealloc(void *ctx, void *ptr, size_t old_size, size_t new_size,
+                                 size_t align)
+{
+    (void)ctx;
+    (void)old_size;
+    if (new_size == 0 || new_size > (size_t)PTRDIFF_MAX) {
+        return NULL;
+    }
+    if (align > _Alignof(max_align_t)) {
+        return NULL;
+    }
+    if (ptr == NULL) {
+        return malloc(new_size);
+    }
+    return realloc(ptr, new_size);
+}
+
+static void alloc_libc_xfree(void *ctx, void *ptr, size_t size, size_t align)
+{
+    (void)ctx;
+    (void)size;
+    (void)align;
+    free(ptr);
+}
+
+static void *alloc_null_xalloc(void *ctx, size_t size, size_t align)
+{
+    (void)ctx;
+    (void)size;
+    (void)align;
+    return NULL;
+}
+
+static void *alloc_null_xrealloc(void *ctx, void *ptr, size_t old_size, size_t new_size,
+                                 size_t align)
+{
+    (void)ctx;
+    (void)ptr;
+    (void)old_size;
+    (void)new_size;
+    (void)align;
+    return NULL;
+}
+
+static void alloc_null_xfree(void *ctx, void *ptr, size_t size, size_t align)
+{
+    (void)ctx;
+    (void)ptr;
+    (void)size;
+    (void)align;
+}
+
+static unsigned char *arena_block_data(struct arena_block *block)
+{
+    return (unsigned char *)(void *)block + ARENA_BLOCK_HDR;
+}
+
+static bool arena_align_valid(size_t align)
+{
+    return (align & (align - 1)) == 0 && align <= ARENA_MAX_ALIGN;
+}
+
+static size_t arena_align_effective(size_t align)
+{
+    size_t effective = align == 0 ? ARENA_DEFAULT_ALIGN : align;
+
+#if defined(ARENA_HAS_ASAN)
+    if (effective < 8) {
+        effective = 8;
+    }
+#endif
+    return effective;
+}
+
+static void arena_fail(arena_t *a, arena_status_t status)
+{
+    if (a->status == ARENA_OK) {
+        a->status = status;
+    }
+}
+
+static void arena_mark_live(struct arena_block *block, unsigned char *ptr, size_t size)
+{
+    ARENA_UNPOISON(ptr, size); /* exact user size, never padded */
+    ARENA_FILL_ALLOC(ptr, size);
+    ARENA_MSAN_ALLOCATED(ptr, size);
+    ARENA_VG_ALLOC(block, ptr, size);
+}
+
+static void arena_mark_dead(struct arena_block *block, size_t keep, size_t dead_end)
+{
+    unsigned char *data = arena_block_data(block);
+
+    if (dead_end <= keep) {
         return;
     }
-    if ((a->flags & ARENA_FLAG_FIXED) != 0) {
-        if (a->current != NULL) {
-            arena_mark_dead(a->current, 0, a->current->used);
-            ARENA_VG_TRIM(a->current, arena_block_data(a->current), 0);
-            a->current->used = 0;
-        }
-    } else {
-        /* The oldest normal block stays current; other normal blocks
-         * move to the free list; oversize blocks return to the parent. */
-        oldest_normal = NULL;
-        for (block = a->current; block != NULL; block = block->link) {
-            if (block->oversize == 0) {
-                oldest_normal = block;
-            }
-        }
-        for (block = a->current; block != NULL; block = next) {
-            next = block->link;
-            if (block == oldest_normal) {
-                continue;
-            }
-            if (block->oversize != 0) {
-                arena_release_block(a, block);
-            } else {
-                arena_retire_block(a, block);
-            }
-        }
-        if (oldest_normal != NULL) {
-            arena_mark_dead(oldest_normal, 0, oldest_normal->used);
-            ARENA_VG_TRIM(oldest_normal, arena_block_data(oldest_normal), 0);
-            oldest_normal->link = NULL;
-            oldest_normal->used = 0;
-        }
-        a->current = oldest_normal;
-    }
-    a->used = 0;
-    a->temp_depth = 0;
-    a->generation += 1u;
-    a->status = ARENA_OK;
+    ARENA_FILL_DEAD(data + keep, dead_end - keep);
+    ARENA_POISON(data + keep, dead_end - keep);
+    ARENA_VG_NOACCESS(data + keep, dead_end - keep);
 }
 
-void arena_trim(arena_t *a)
+static void arena_rewind_block(struct arena_block *block)
 {
-    struct arena_block *block;
-    struct arena_block *next;
-
-    if (a == NULL || (a->flags & ARENA_FLAG_FIXED) != 0) {
-        return;
-    }
-    for (block = a->free_blocks; block != NULL; block = next) {
-        next = block->link;
-        arena_release_block(a, block);
-    }
-    a->free_blocks = NULL;
+    arena_mark_dead(block, 0, block->used);
+    ARENA_VG_TRIM(block, arena_block_data(block), 0);
+    block->used = 0;
 }
 
-arena_temp_t arena_temp_begin(arena_t *a)
+static void *arena_try_bump(arena_t *a, size_t size, size_t align_eff)
 {
-    arena_temp_t temp;
-
-    temp.arena = a;
-    temp.block = NULL;
-    temp.block_used = 0;
-    temp.used = 0;
-    temp.generation = 0;
-    temp.depth = 0;
-    if (a == NULL) {
-        return temp;
-    }
-    a->temp_depth += 1u;
-    temp.block = a->current;
-    temp.block_used = a->current != NULL ? a->current->used : 0;
-    temp.used = a->used;
-    temp.generation = a->generation;
-    temp.depth = a->temp_depth;
-    return temp;
-}
-
-void arena_temp_end(arena_temp_t temp)
-{
-    arena_t *a = temp.arena;
-    struct arena_block *block;
-    struct arena_block *next;
-
-    if (a == NULL) {
-        return;
-    }
-    /* Stale temps are contract violations; these checks are the debug
-     * detection the header promises. */
-    assert(temp.generation == a->generation);
-    assert(temp.depth == a->temp_depth);
-    block = a->current;
-    while (block != NULL && block != temp.block) {
-        next = block->link;
-        if (block->oversize != 0) {
-            arena_release_block(a, block);
-        } else {
-            arena_retire_block(a, block);
-        }
-        block = next;
-    }
-    assert(block == temp.block);
-    a->current = block;
-    if (block != NULL) {
-        arena_mark_dead(block, temp.block_used, block->used);
-        ARENA_VG_TRIM(block, arena_block_data(block), temp.block_used);
-        block->used = temp.block_used;
-    }
-    a->used = temp.used;
-    if (a->temp_depth > 0) {
-        a->temp_depth -= 1u;
-    }
-}
-
-void *arena_realloc(arena_t *a, void *ptr, size_t old_size, size_t new_size, size_t align)
-{
-    struct arena_block *block;
+    struct arena_block *block = a->current;
     unsigned char *data;
-    uintptr_t ptr_addr;
-    uintptr_t data_addr;
-    size_t offset;
-    size_t growth;
-    void *fresh;
+    unsigned char *cursor;
+    size_t pad;
+    size_t avail;
+    size_t total;
+
+    if (block == NULL) {
+        return NULL;
+    }
+    data = arena_block_data(block);
+    cursor = data + block->used;
+    pad = (size_t)(-(uintptr_t)cursor & (uintptr_t)(align_eff - 1));
+    avail = block->cap - block->used;
+    total = size + ARENA_REDZONE;
+    if (pad > avail || total > avail - pad) {
+        return NULL;
+    }
+    block->used += pad + total;
+    a->used += pad + total;
+    if (a->used > a->high_water) {
+        a->high_water = a->used;
+    }
+    arena_mark_live(block, cursor + pad, size);
+    return cursor + pad;
+}
+
+static struct arena_block *arena_take_free_block(arena_t *a, size_t data_need)
+{
+    struct arena_block **linkp;
+    struct arena_block *block;
+
+    for (linkp = &a->free_blocks; *linkp != NULL; linkp = &(*linkp)->link) {
+        if ((*linkp)->cap >= data_need) {
+            block = *linkp;
+            *linkp = block->link;
+            return block;
+        }
+    }
+    return NULL;
+}
+
+static struct arena_block *arena_new_block(arena_t *a, size_t data_need)
+{
+    struct arena_block *block;
+    size_t target = a->next_block;
+    size_t block_size;
+
+    if (ARENA_BLOCK_HDR + data_need <= target) {
+        block_size = target;
+    } else {
+        block_size = ARENA_BLOCK_HDR + data_need;
+    }
+    block = alloc_alloc(&a->parent, block_size, 0);
+    if (block == NULL) {
+        arena_fail(a, ARENA_ERR_ALLOC);
+        return NULL;
+    }
+    block->cap = block_size - ARENA_BLOCK_HDR;
+    block->used = 0;
+    block->oversize = (unsigned)(block_size != target);
+    if (block->oversize == 0) {
+        a->next_block = target * 2 > a->max_block ? a->max_block : target * 2;
+    }
+    a->committed += block_size;
+    ARENA_VG_CREATE(block);
+    ARENA_POISON(arena_block_data(block), block->cap);
+    ARENA_VG_NOACCESS(arena_block_data(block), block->cap);
+    return block;
+}
+
+static void *arena_grow_and_bump(arena_t *a, size_t size, size_t align_eff)
+{
+    struct arena_block *block;
+    size_t data_need;
+    void *ptr;
+
+    if ((a->flags & ARENA_FLAG_FIXED) != 0) {
+        arena_fail(a, ARENA_ERR_ALLOC);
+        return NULL;
+    }
+    /* Worst-case data bytes: request plus alignment slack plus redzone.
+     * size is capped at PTRDIFF_MAX and align_eff at ARENA_MAX_ALIGN, so
+     * this sum cannot wrap size_t. */
+    data_need = size + (align_eff - 1) + ARENA_REDZONE;
+    if (data_need > (size_t)PTRDIFF_MAX - ARENA_BLOCK_HDR) {
+        arena_fail(a, ARENA_ERR_OVERFLOW);
+        return NULL;
+    }
+    /* First fit over retained blocks before asking the parent. Retained
+     * data is already dead-marked; only the pool anchor returns. */
+    block = arena_take_free_block(a, data_need);
+    if (block == NULL) {
+        block = arena_new_block(a, data_need);
+        if (block == NULL) {
+            return NULL;
+        }
+    }
+    block->link = a->current;
+    block->used = 0;
+    a->current = block;
+    ptr = arena_try_bump(a, size, align_eff);
+    assert(ptr != NULL); /* cap covers worst-case padding */
+    return ptr;
+}
+
+static void *arena_alloc_impl(arena_t *a, size_t count, size_t size, size_t align)
+{
+    size_t align_eff;
+    size_t total;
+    void *ptr;
 
     if (a == NULL) {
         return NULL;
@@ -766,64 +825,133 @@ void *arena_realloc(arena_t *a, void *ptr, size_t old_size, size_t new_size, siz
         arena_fail(a, ARENA_ERR_ARG);
         return NULL;
     }
-    if (new_size == 0) {
-        /* Freeing through realloc is forbidden by the interface; refuse
-         * with a recorded status instead of inheriting realloc(p, 0)
-         * divergence. */
-        arena_fail(a, ARENA_ERR_ARG);
+    if (count == 0 || size == 0) {
         return NULL;
     }
-    assert(ptr != NULL || old_size == 0);
-    if (ptr == NULL) {
-        return arena_alloc_impl(a, 1, new_size, align);
-    }
-    if (new_size > (size_t)PTRDIFF_MAX) {
+    if (count > (size_t)PTRDIFF_MAX / size) {
         arena_fail(a, ARENA_ERR_OVERFLOW);
         return NULL;
     }
-    /*
-     * The last-allocation fast path. The membership test runs in
-     * integer space: a relational pointer comparison against another
-     * block's data would be undefined.
-     */
-    block = a->current;
-    if (block != NULL) {
-        data = arena_block_data(block);
-        ptr_addr = (uintptr_t)ptr;
-        data_addr = (uintptr_t)data;
-        if (ptr_addr >= data_addr && ptr_addr - data_addr <= block->cap) {
-            offset = (size_t)(ptr_addr - data_addr);
-            if (offset + old_size + ARENA_REDZONE == block->used) {
-                if (new_size > old_size) {
-                    growth = new_size - old_size;
-                    if (growth <= block->cap - block->used) {
-                        block->used += growth;
-                        a->used += growth;
-                        if (a->used > a->high_water) {
-                            a->high_water = a->used;
-                        }
-                        /* The extension must become addressable on this
-                         * path too, not only on the move path. */
-                        ARENA_UNPOISON((unsigned char *)ptr + old_size, growth);
-                        ARENA_FILL_ALLOC((unsigned char *)ptr + old_size, growth);
-                        ARENA_MSAN_ALLOCATED((unsigned char *)ptr + old_size, growth);
-                        ARENA_VG_CHANGE(block, ptr, new_size);
-                        ARENA_VG_UNDEFINED((unsigned char *)ptr + old_size, growth);
-                        return ptr;
-                    }
-                    /* Does not fit in place; fall through to the move
-                     * path. */
-                } else {
-                    block->used -= old_size - new_size;
-                    a->used -= old_size - new_size;
-                    ARENA_VG_CHANGE(block, ptr, new_size);
-                    arena_mark_dead(block, offset + new_size, offset + old_size);
-                    return ptr;
-                }
-            }
-        }
+    total = count * size;
+    align_eff = arena_align_effective(align);
+    ptr = arena_try_bump(a, total, align_eff);
+    if (ptr != NULL) {
+        return ptr;
     }
-    fresh = arena_alloc_impl(a, 1, new_size, align);
+    return arena_grow_and_bump(a, total, align_eff);
+}
+
+static void arena_retire_block(arena_t *a, struct arena_block *block)
+{
+    arena_rewind_block(block);
+    block->link = a->free_blocks;
+    a->free_blocks = block;
+}
+
+static void arena_release_block(arena_t *a, struct arena_block *block)
+{
+    size_t block_size = ARENA_BLOCK_HDR + block->cap;
+
+    ARENA_FILL_DEAD(arena_block_data(block), block->used);
+    ARENA_VG_DESTROY(block);
+    a->committed -= block_size;
+    alloc_free(&a->parent, block, block_size, 0);
+}
+
+static void arena_release_chain(arena_t *a, struct arena_block *first)
+{
+    struct arena_block *block;
+    struct arena_block *next;
+
+    for (block = first; block != NULL; block = next) {
+        next = block->link;
+        arena_release_block(a, block);
+    }
+}
+
+static void arena_pop_to_block(arena_t *a, struct arena_block *stop)
+{
+    struct arena_block *block = a->current;
+    struct arena_block *next;
+
+    while (block != NULL && block != stop) {
+        next = block->link;
+        if (block->oversize != 0) {
+            arena_release_block(a, block);
+        } else {
+            arena_retire_block(a, block);
+        }
+        block = next;
+    }
+    assert(block == stop);
+    a->current = block;
+}
+
+static bool arena_is_last_alloc(const arena_t *a, const void *ptr, size_t size, size_t *out_offset)
+{
+    struct arena_block *block = a->current;
+    uintptr_t ptr_addr;
+    uintptr_t data_addr;
+    size_t offset;
+
+    if (block == NULL) {
+        return false;
+    }
+    ptr_addr = (uintptr_t)ptr;
+    data_addr = (uintptr_t)arena_block_data(block);
+    if (ptr_addr < data_addr || ptr_addr - data_addr > block->cap) {
+        return false;
+    }
+    offset = (size_t)(ptr_addr - data_addr);
+    if (offset + size + ARENA_REDZONE != block->used) {
+        return false;
+    }
+    *out_offset = offset;
+    return true;
+}
+
+static void *arena_try_resize_last(arena_t *a, void *ptr, size_t old_size, size_t new_size)
+{
+    struct arena_block *block = a->current;
+    unsigned char *extension;
+    size_t offset;
+    size_t growth;
+
+    if (!arena_is_last_alloc(a, ptr, old_size, &offset)) {
+        return NULL;
+    }
+    if (new_size <= old_size) {
+        block->used -= old_size - new_size;
+        a->used -= old_size - new_size;
+        ARENA_VG_CHANGE(block, ptr, new_size);
+        arena_mark_dead(block, offset + new_size, offset + old_size);
+        return ptr;
+    }
+    growth = new_size - old_size;
+    if (growth > block->cap - block->used) {
+        return NULL; /* does not fit in place; the move path runs */
+    }
+    block->used += growth;
+    a->used += growth;
+    if (a->used > a->high_water) {
+        a->high_water = a->used;
+    }
+    /* The extension must become addressable on this path too, not only
+     * on the move path. */
+    extension = (unsigned char *)ptr + old_size;
+    ARENA_UNPOISON(extension, growth);
+    ARENA_FILL_ALLOC(extension, growth);
+    ARENA_MSAN_ALLOCATED(extension, growth);
+    ARENA_VG_CHANGE(block, ptr, new_size);
+    ARENA_VG_UNDEFINED(extension, growth);
+    return ptr;
+}
+
+static void *arena_realloc_move(arena_t *a, void *ptr, size_t old_size, size_t new_size,
+                                size_t align)
+{
+    void *fresh = arena_alloc_impl(a, 1, new_size, align);
+
     if (fresh == NULL) {
         return NULL; /* status recorded; the old block stays valid */
     }
@@ -837,13 +965,6 @@ void *arena_realloc(arena_t *a, void *ptr, size_t old_size, size_t new_size, siz
     return fresh;
 }
 
-/*
- * The alloc_t adapter. xfree rolls the cursor back when given the most
- * recent live allocation, judged in integer space against the current
- * block's cursor, and is a harmless no-op otherwise. The alignment
- * padding consumed in front of a rolled-back allocation stays consumed.
- */
-
 static void *arena_adapter_xalloc(void *ctx, size_t size, size_t align)
 {
     return arena_alloc_n(ctx, 1, size, align);
@@ -855,43 +976,23 @@ static void *arena_adapter_xrealloc(void *ctx, void *ptr, size_t old_size, size_
     return arena_realloc(ctx, ptr, old_size, new_size, align);
 }
 
+/* Rolls the cursor back for the most recent live allocation and is a
+ * harmless no-op otherwise. The alignment padding consumed in front of
+ * a rolled-back allocation stays consumed. */
 static void arena_adapter_xfree(void *ctx, void *ptr, size_t size, size_t align)
 {
     arena_t *a = ctx;
-    struct arena_block *block;
-    uintptr_t ptr_addr;
-    uintptr_t data_addr;
     size_t offset;
 
     (void)align;
     if (a == NULL || ptr == NULL) {
         return;
     }
-    block = a->current;
-    if (block == NULL) {
+    if (!arena_is_last_alloc(a, ptr, size, &offset)) {
         return;
     }
-    data_addr = (uintptr_t)arena_block_data(block);
-    ptr_addr = (uintptr_t)ptr;
-    if (ptr_addr < data_addr || ptr_addr - data_addr > block->cap) {
-        return;
-    }
-    offset = (size_t)(ptr_addr - data_addr);
-    if (offset + size + ARENA_REDZONE != block->used) {
-        return;
-    }
-    ARENA_VG_FREE(block, ptr);
-    arena_mark_dead(block, offset, block->used);
-    block->used = offset;
+    ARENA_VG_FREE(a->current, ptr);
+    arena_mark_dead(a->current, offset, a->current->used);
+    a->current->used = offset;
     a->used -= size + ARENA_REDZONE;
-}
-
-alloc_t arena_allocator(arena_t *a)
-{
-    alloc_t backend = {a, arena_adapter_xalloc, arena_adapter_xrealloc, arena_adapter_xfree};
-
-    if (a == NULL) {
-        return alloc_null();
-    }
-    return backend;
 }

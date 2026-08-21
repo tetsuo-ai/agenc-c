@@ -160,7 +160,7 @@ static inline void alloc_free(const alloc_t *a, void *ptr, size_t size, size_t a
 }
 
 /* alloc_alloc plus memset to zero on success. Zeroing is deliberately
- * outside the vtable; see SPEC.md section 1.7. */
+ * outside the vtable; callers that want zeroing use alloc_zeroed. */
 static inline void *alloc_zeroed(const alloc_t *a, size_t size, size_t align)
 {
     void *ptr = alloc_alloc(a, size, align);

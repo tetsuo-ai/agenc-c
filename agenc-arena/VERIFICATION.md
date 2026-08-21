@@ -316,7 +316,7 @@ re-run green under gcc and clang, valgrind 0 errors, analyzers clean,
 fuzz sanity clean.
 
 Addendum 2026-08-20, final conformance pass: three fresh verification
-agents (SPEC-to-code clause by clause, this document and PLAN.md promise
+agents (contract-to-code clause by clause, this document promise
 by promise, and an adversarial code review with compiled probes and a
 600-seed randomized sweep) plus a source fact-check of RESEARCH.md and
 the READMEs, followed by fixes for everything found.
@@ -339,7 +339,7 @@ matches its own description (empty seed, one-op seeds per backend).
 
 Fuzz campaign, re-run on the shipped harness: 899195 executions in
 3601 seconds under fuzzer,address,undefined, zero findings, no crash
-artifacts. This re-earns PLAN.md's M7 gate against the current code.
+artifacts. This re-earns the one-hour fuzz gate against the current code.
 
 Revert-sensitivity record: the arena_init_fixed cap test was proven
 red against the guard-removed source. Two earlier fixes are recorded

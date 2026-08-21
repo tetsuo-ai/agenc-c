@@ -1,6 +1,6 @@
 # agenc-arena research survey
 
-Findings that ground PLAN.md, SPEC.md, and VERIFICATION.md. Four research
+Findings behind the implementation and its verification plan. Four research
 passes were run on 2026-08-20: practitioner arena implementations, the
 academic region-allocation literature, allocator-interface precedents, and
 correctness/sanitizer/verification practice. Every claim below was checked

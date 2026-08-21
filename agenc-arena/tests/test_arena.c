@@ -25,7 +25,7 @@
 
 enum { TEST_SMALL = 16, TEST_MEDIUM = 64, TEST_LARGE = 128, TEST_FILL_BYTE = 0x5C };
 
-/* SPEC.md section 6: the public constants are stable API; pin them. */
+/* The public constants are stable API; pin them. */
 _Static_assert(ARENA_MIN_BLOCK_DEFAULT == 4096, "stable API");
 _Static_assert(ARENA_MAX_BLOCK_DEFAULT == 65536, "stable API");
 _Static_assert(ARENA_DEFAULT_ALIGN == _Alignof(max_align_t), "stable API");
@@ -1732,7 +1732,7 @@ static void test_alloc_libc_contract(void)
 
 #include <sanitizer/asan_interface.h>
 
-/* T2/T3: the poisoning contract holds exactly where SPEC.md section 3
+/* T2/T3: the poisoning contract holds exactly where the headers
  * promises it. */
 static void test_asan_poisoning(void)
 {

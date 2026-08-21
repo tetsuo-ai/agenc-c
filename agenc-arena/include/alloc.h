@@ -54,8 +54,12 @@
  * complete failure test. size > 0 returns a pointer to at least size
  * bytes whose address is a multiple of the effective alignment, or NULL
  * if and only if the request cannot be fulfilled (out of memory,
- * unsupported alignment, or internally unrepresentable size; callers
- * cannot distinguish these). The memory is uninitialized. Requests
+ * unsupported alignment, internally unrepresentable size, or an earlier
+ * failure that the backend latched; callers cannot distinguish these).
+ * A latching backend, such as an arena with its sticky status, refuses
+ * every request after a failure until its owner intervenes, so callers
+ * must not assume probe-and-retry succeeds through this interface.
+ * The memory is uninitialized. Requests
  * larger than PTRDIFF_MAX must fail with NULL. The block stays valid
  * until passed to xfree or xrealloc of an equal allocator, or until the
  * owner of the instance behind ctx resets or destroys it, whichever

@@ -48,7 +48,6 @@ static void test_alloc_null_contract(void)
     EXPECT(alloc_alloc(&na, TEST_MEDIUM, TEST_SMALL) == NULL);
     EXPECT(alloc_realloc(&na, NULL, 0, TEST_SMALL, 0) == NULL);
     EXPECT(alloc_zeroed(&na, TEST_MEDIUM, 0) == NULL);
-    EXPECT(test_is_aligned(foreign, 1));
     alloc_free(&na, NULL, 0, 0);
     alloc_free(&na, foreign, sizeof(foreign), 0); /* documented no-op */
 }
@@ -149,14 +148,17 @@ static void test_fixed_tiny_buffers(void)
     arena_init_fixed(&a, NULL, 64);
     EXPECT(arena_status(&a) == ARENA_ERR_ARG);
 
-    /* Sizes below the bookkeeping overhead: valid arena, allocations
-     * fail cleanly. */
+    /* Sizes up to the worst-case overhead: always a valid arena; the
+     * real header cost can be smaller, so the allocation either
+     * succeeds cleanly or fails cleanly with ARENA_ERR_ALLOC. */
     for (size = 1; size < ARENA_FIXED_OVERHEAD; size++) {
         arena_init_fixed(&a, storage, size);
         EXPECT(arena_ok(&a));
         ptr = arena_alloc(&a, 1);
         if (ptr == NULL) {
             EXPECT(arena_status(&a) == ARENA_ERR_ALLOC);
+        } else {
+            EXPECT(arena_ok(&a));
         }
         arena_deinit(&a);
     }
@@ -197,6 +199,7 @@ static void test_arg_and_overflow_guards(void)
     volatile size_t over_cap = (size_t)PTRDIFF_MAX + 1;
     volatile size_t huge_count = SIZE_MAX / 2;
     volatile size_t over_count = (size_t)PTRDIFF_MAX / TEST_SMALL + 1;
+    volatile size_t guard_max = (size_t)PTRDIFF_MAX;
     arena_t a;
 
     arena_init_fixed(&a, buffer, sizeof(buffer));
@@ -232,8 +235,13 @@ static void test_arg_and_overflow_guards(void)
     EXPECT(arena_status(&a) == ARENA_ERR_OVERFLOW);
     arena_clear_error(&a);
 
-    /* Just inside the product guard still fails on capacity, not
-     * overflow. */
+    /* A size that passes the product guard but dwarfs the buffer fails
+     * on capacity, never on overflow. */
+    EXPECT(arena_alloc_n(&a, 1, guard_max, 0) == NULL);
+    EXPECT(arena_status(&a) == ARENA_ERR_ALLOC);
+    arena_clear_error(&a);
+
+    /* An ordinary product inside the guard succeeds. */
     EXPECT(arena_alloc_n(&a, 2, TEST_SMALL, 0) != NULL);
 
     /* NULL memdup source with nonzero size. */
@@ -460,7 +468,6 @@ static void test_realloc_fixed(void)
 #if !defined(NDEBUG) && defined(__unix__)
 
 #include <signal.h>
-#include <stdio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -511,10 +518,30 @@ static void violate_temp_after_reset(void)
     arena_temp_end(temp); /* stale: the arena was reset since begin */
 }
 
+static void violate_temp_rollback(void)
+{
+    static _Alignas(max_align_t) unsigned char buffer[512];
+    arena_t a;
+    alloc_t ad;
+    arena_temp_t temp;
+    void *before_scope;
+
+    arena_init_fixed(&a, buffer, sizeof(buffer));
+    ad = arena_allocator(&a);
+    before_scope = alloc_alloc(&ad, TEST_MEDIUM, 0);
+    temp = arena_temp_begin(&a);
+    /* Releasing a pre-scope allocation inside the scope moves the
+     * cursor below the snapshot: a contract violation the end-of-scope
+     * checks must catch. */
+    alloc_free(&ad, before_scope, TEST_MEDIUM, 0);
+    arena_temp_end(temp);
+}
+
 static void test_temp_violation_death(void)
 {
     expect_abort(violate_temp_order);
     expect_abort(violate_temp_after_reset);
+    expect_abort(violate_temp_rollback);
 }
 
 #endif /* !NDEBUG && __unix__ */
@@ -897,6 +924,7 @@ static void test_realloc_matrix(void)
     unsigned char *other;
     unsigned char *moved;
     size_t committed_before;
+    size_t used_before;
     size_t idx;
 
     memset(&t, 0, sizeof(t));
@@ -934,9 +962,9 @@ static void test_realloc_matrix(void)
     }
 
     /* Shrink of the last allocation returns the tail. */
-    committed_before = arena_used(&a);
+    used_before = arena_used(&a);
     EXPECT(arena_realloc(&a, ptr, 3000, 1000, 0) == ptr);
-    EXPECT(arena_used(&a) == committed_before - 2000);
+    EXPECT(arena_used(&a) == used_before - 2000);
 
     /* Parent refusal on the move path: NULL, status recorded, the old
      * region intact. */
@@ -963,6 +991,7 @@ static void test_realloc_matrix(void)
 static void test_adapter_contract(void)
 {
     static struct track_ctx t;
+    volatile size_t huge = SIZE_MAX - 8;
     arena_t a;
     alloc_t ad;
     void *first;
@@ -1011,6 +1040,11 @@ static void test_adapter_contract(void)
     EXPECT(first != NULL && second != NULL);
     used_before = arena_used(&a);
     alloc_free(&ad, first, TEST_SMALL, 0);
+    EXPECT(arena_used(&a) == used_before);
+
+    /* A garbage size stays a no-op instead of wrapping into a bogus
+     * cursor rollback. */
+    alloc_free(&ad, second, huge, 0);
     EXPECT(arena_used(&a) == used_before);
 
     /* Realloc through the adapter: last allocation grows in place. */

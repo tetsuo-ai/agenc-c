@@ -62,6 +62,11 @@ static void demo_fixed(void)
     printf("== fixed arena (no heap) ==\n");
     arena_init_fixed(&a, buffer, sizeof(buffer));
     text = arena_memdup(&a, "heap-free", 10);
+    if (text == NULL) {
+        printf("allocation failed: %s\n", arena_status_name(arena_status(&a)));
+        arena_deinit(&a);
+        return;
+    }
     printf("text=%s used=%zu of %zu\n", text, arena_used(&a), arena_committed(&a));
 
     /* Exhaustion is a clean, sticky failure. */

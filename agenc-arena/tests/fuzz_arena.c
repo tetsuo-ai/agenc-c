@@ -238,12 +238,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             /* fuzz_record refilled it; both entries verify independently
              * because record gave the copy its own seed. */
             break;
-        case 4: /* realloc a live entry with exact old size and align */
+        case 4: /* realloc a live in-scope entry with exact old size and
+                 * align; older entries are off limits while a temp scope
+                 * is open (the header's in-scope-only rule) */
             if (m.live_count == 0) {
                 break;
             }
             idx = fuzz_byte(&in) % m.live_count;
             entry = &m.live[idx];
+            if (entry->level != m.temp_depth) {
+                break;
+            }
             new_size = fuzz_pick_size(&in);
             if (new_size == 0) {
                 new_size = 1;
@@ -294,12 +299,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             }
             fuzz_record(&m, ptr, req_size, 0);
             break;
-        default: /* adapter free of the newest entry (LIFO or no-op) */
+        default: /* adapter free of the newest in-scope entry (LIFO
+                  * rollback or no-op); older entries are off limits
+                  * while a temp scope is open */
             if (m.live_count == 0) {
                 break;
             }
             idx = m.live_count - 1;
             entry = &m.live[idx];
+            if (entry->level != m.temp_depth) {
+                break;
+            }
             alloc_free(&adapter, entry->ptr, entry->size, entry->align);
             fuzz_remove(&m, idx);
             break;

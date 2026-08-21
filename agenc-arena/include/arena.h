@@ -21,7 +21,10 @@
  * (min_block doubling to max_block) and retained for reuse on a
  * per-arena free list, and oversize blocks, created for single
  * allocations larger than the policy size and returned to the parent as
- * soon as they die. There is no cross-arena sharing of any kind.
+ * soon as they die. There is no cross-arena sharing of any kind. Under
+ * AddressSanitizer, blocks return to the parent with their interior
+ * bytes still poisoned; a custom parent that inspects or fills memory
+ * inside xfree must account for that.
  *
  * Independent arenas may be used concurrently. Anything that touches one
  * arena, including through its alloc_t adapter or a temp scope, requires
@@ -62,7 +65,8 @@ typedef enum {
 #define ARENA_DEFAULT_ALIGN _Alignof(max_align_t)
 /* Largest per-call align the arena serves. */
 #define ARENA_MAX_ALIGN (((size_t)1) << 16)
-/* Worst-case bytes of a fixed buffer consumed by bookkeeping. */
+/* Worst-case bytes of a fixed buffer consumed by bookkeeping; also the
+ * floor for min_block, since every block must hold the same header. */
 #define ARENA_FIXED_OVERHEAD ((size_t)64)
 /* Bytes of poisoned redzone between allocations, ASan builds only. */
 #define ARENA_ASAN_REDZONE ((size_t)16)
@@ -152,7 +156,9 @@ arena_status_t arena_init_sized(arena_t *a, alloc_t parent, size_t min_block, si
  * and never touches a parent allocator. Any buffer alignment is
  * accepted; up to ARENA_FIXED_OVERHEAD bytes are consumed by
  * bookkeeping. The buffer must outlive the arena and is never freed by
- * it. A NULL buffer or zero size records ARENA_ERR_ARG. NULL arena is a
+ * it. Under checking builds the buffer stays poisoned while the arena
+ * lives; call arena_deinit before reusing or discarding the storage. A
+ * NULL buffer or zero size records ARENA_ERR_ARG. NULL arena is a
  * no-op.
  */
 void arena_init_fixed(arena_t *a, void *buffer, size_t size);
@@ -191,7 +197,9 @@ void arena_clear_error(arena_t *a);
  * without changing the arena. A zero total size returns NULL as success,
  * recording nothing; arena_failed distinguishes that from failure. align
  * is 0 (meaning ARENA_DEFAULT_ALIGN) or a power of two up to
- * ARENA_MAX_ALIGN; other align values record ARENA_ERR_ARG. A size
+ * ARENA_MAX_ALIGN; other align values record ARENA_ERR_ARG, and align is
+ * validated before the zero-size early return, so an invalid align is
+ * reported even for zero-size requests. A size
  * above PTRDIFF_MAX, or a count * size product that would exceed it,
  * records ARENA_ERR_OVERFLOW. Parent refusal or fixed-buffer exhaustion
  * records ARENA_ERR_ALLOC. Success returns uninitialized memory (zeroed
@@ -224,15 +232,18 @@ void *arena_alloc_n_zeroed(arena_t *a, size_t count, size_t size, size_t align) 
 void *arena_memdup(arena_t *a, const void *src, size_t size) ARENA_ATTR_ALLOC_SIZE(3);
 
 /*
- * Follows the alloc.h xrealloc contract: new_size must not be 0, align
- * must equal the allocating call's align, a NULL ptr with old_size 0
- * behaves as arena_alloc_n(a, 1, new_size, align), and old_size must
- * equal exactly the size established by the most recent allocating call
- * for ptr. When ptr is the arena's most recent live allocation it grows
- * or shrinks in place when the current block allows; otherwise the call
- * allocates, copies min(old_size, new_size) bytes, and abandons the old
- * region, which stays part of the arena until rewind. Failure returns
- * NULL, records the status, and leaves the old block valid.
+ * Follows the alloc.h xrealloc contract. A NULL ptr with old_size 0
+ * behaves as arena_alloc_n(a, 1, new_size, align). When ptr is the
+ * arena's most recent live allocation it grows or shrinks in place when
+ * the current block allows; otherwise the call allocates, copies
+ * min(old_size, new_size) bytes, and abandons the old region, which
+ * stays part of the arena until rewind. Failure returns NULL, records
+ * the status, and leaves the old block valid.
+ * The contract's violations get three different fates here: an invalid
+ * align or a zero new_size is detected in every build and records
+ * ARENA_ERR_ARG; a NULL ptr with nonzero old_size aborts in debug
+ * builds and is undefined in release builds; a wrong old_size or align
+ * for ptr is undefined in every build.
  */
 void *arena_realloc(arena_t *a, void *ptr, size_t old_size, size_t new_size, size_t align)
     ARENA_ATTR_ALLOC_SIZE(4);
@@ -250,10 +261,15 @@ arena_temp_t arena_temp_begin(arena_t *a);
  * oversize blocks created since then return to the parent, used returns
  * to its snapshot value, and temp_depth decrements. The sticky status is
  * not cleared; a failure inside the scope stays observable. Scopes nest
- * and must end in LIFO order. Ending a temp whose arena has since been
- * reset, deinitialized, or already rewound past it is a contract
- * violation: debug builds abort via the generation and depth checks,
- * release builds have undefined behavior.
+ * and must end in LIFO order. While a scope is open, arena_realloc and
+ * the adapter's xfree may be applied only to allocations made inside
+ * the current scope; releasing or resizing an older allocation moves
+ * the cursor the snapshot describes and is a contract violation. Ending
+ * a temp whose arena has since been reset, deinitialized, or already
+ * rewound past it is a violation as well. Debug builds abort where the
+ * generation, depth, and cursor checks can detect these; release builds
+ * have undefined behavior, though the rewind never raises a cursor, so
+ * released bytes are not resurrected.
  */
 void arena_temp_end(arena_temp_t temp);
 
@@ -261,10 +277,14 @@ void arena_temp_end(arena_temp_t temp);
  * Presents the arena as an alloc_t whose ctx is a. xalloc bumps the
  * arena, xrealloc follows arena_realloc, and xfree rolls the cursor back
  * when given the most recent live allocation and is a no-op otherwise,
- * so LIFO alloc/free pairs cost zero net memory. The adapter inherits
- * the arena's single-owner thread contract and dies with it: reset or
- * deinit invalidates every block it handed out. Returns an inert
- * always-failing value for a NULL arena.
+ * so LIFO alloc/free pairs cost zero net memory apart from alignment
+ * padding, which stays consumed. Failures stick like every arena
+ * failure: later requests through the adapter return NULL until the
+ * arena's owner clears or resets, and a generic alloc_t consumer cannot
+ * do that itself, so probe-and-retry does not work through the adapter.
+ * The adapter inherits the arena's single-owner thread contract and
+ * dies with it: reset or deinit invalidates every block it handed out.
+ * Returns an inert always-failing value for a NULL arena.
  */
 alloc_t arena_allocator(arena_t *a);
 
@@ -285,8 +305,9 @@ bool arena_failed(const arena_t *a);
 
 /*
  * Statistics. used counts live bytes handed out, alignment padding and
- * ASan redzones included; padding of abandoned realloc sources stays
- * counted until rewind. committed counts bytes held from the parent or
+ * ASan redzones included; the padding and redzone of an abandoned
+ * realloc source stay counted until rewind. committed counts bytes held
+ * from the parent or
  * the fixed buffer, block headers and the free list included.
  * high_water is the maximum used has reached since init; reset preserves
  * it, deinit does not. NULL arena observes as zero.

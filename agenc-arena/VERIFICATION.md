@@ -255,3 +255,22 @@ variant, 33907 under ASan (poisoning probes added), 27236 in release
 | Cross-target/hardware test (32-bit, big-endian) | unavailable (no multilib libc on this machine; code carries no layout or endianness assumptions and is -Wconversion clean) |
 | MemorySanitizer job | not applicable as a standing job (hooks are implemented and compile; no MSan target in the matrix yet) |
 | Reproducible build | not applicable (no released artifacts; adoption is source copy) |
+
+Addendum 2026-08-20, second review pass: two independent reviewer agents
+(adversarial correctness, legibility against the reference) plus a
+manual read produced one probe-proven defect and a set of contract and
+comment corrections, all applied and re-verified. The defect:
+arena_temp_end was not rollback-aware, so releasing or resizing a
+pre-scope allocation inside a temp scope corrupted poison state and
+resurrected freed bytes in the used statistic. Resolution: such
+operations are now a documented contract violation (in-scope-only rule
+in arena.h and SPEC 2.5/4.4), arena_temp_end detects the cursor
+regression in debug builds and never raises a cursor in release builds,
+and a revert-sensitive death test guards the detection. Also fixed: the
+adapter's sticky-latch behavior is documented in alloc.h and arena.h
+(it previously contradicted the interface's NULL-iff wording), the
+last-allocation test rejects wrapping garbage sizes so adapter xfree
+stays a no-op under violations, and the libc backend honors the
+shrinks-never-fail promise by returning the old block when realloc
+refuses a shrink. Full matrix re-run green under gcc and clang
+(27278 checks), valgrind clean, analyzers clean, fuzz sanity clean.

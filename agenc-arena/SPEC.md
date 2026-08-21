@@ -241,7 +241,9 @@ typedef struct arena_temp {
 
 `struct arena_block` is declared in arena.h and defined only in arena.c.
 
-Invariants (checked by debug assertions, relied on everywhere):
+Invariants (relied on everywhere; the suite and the fuzz harness's
+shadow model verify them externally, and debug assertions cover the
+cursor and temp-scope checks):
 
 - `used <= committed`, `high_water >= used`.
 - Cursor arithmetic never forms a pointer outside a live block; all
@@ -265,9 +267,10 @@ void arena_clear_error(arena_t *a);
 - `arena_init`: default block sizes. Never allocates; the first block is
   obtained lazily on the first allocation, so init cannot fail. NULL `a`
   is a no-op.
-- `arena_init_sized`: validates `0 < min_block <= max_block <=
-  PTRDIFF_MAX` and that min_block can hold the block header plus one
-  default-aligned byte; returns and records ARENA_ERR_ARG otherwise.
+- `arena_init_sized`: validates `ARENA_FIXED_OVERHEAD <= min_block <=
+  max_block <= PTRDIFF_MAX` (the constant doubles as the smallest block
+  able to hold the block header); returns and records ARENA_ERR_ARG
+  otherwise.
 - `arena_init_fixed`: the arena serves from `buffer` only and fails with
   ARENA_ERR_ALLOC when it is exhausted. Any `buffer` alignment is
   accepted; the first allocation aligns internally. A small bookkeeping
@@ -360,10 +363,15 @@ void arena_temp_end(arena_temp_t temp);
   `used` returns to its snapshot value, and `temp_depth` decrements.
   Sticky status is not cleared (a failure inside a temp scope stays
   observable).
-- Scopes nest and must end in LIFO order. Ending a temp whose arena has
-  since been reset, deinitialized, or already rewound past it is a
-  contract violation; debug builds detect it through the generation and
-  depth fields and abort, release builds have undefined behavior.
+- Scopes nest and must end in LIFO order. While a scope is open,
+  arena_realloc and the adapter's xfree may be applied only to
+  allocations made inside the current scope; releasing or resizing an
+  older allocation moves the cursor the snapshot describes and is a
+  contract violation. Ending a temp whose arena has since been reset,
+  deinitialized, or already rewound past it is a violation as well.
+  Debug builds detect these through the generation, depth, and cursor
+  checks and abort; release builds have undefined behavior, though the
+  rewind never raises a cursor, so released bytes are not resurrected.
 - After `arena_temp_end`, pointers into the rewound region are dangling.
   Checking builds fill and poison the region (section 3).
 
@@ -390,6 +398,10 @@ Returns an alloc_t whose ctx is `a`:
   arena invalidates every block it handed out, without individual frees.
 
 This is how agenc-ds and later libraries run entirely inside an arena.
+Failures stick like every arena failure: after one, requests through the
+adapter return NULL until the arena's owner clears or resets, which a
+generic alloc_t consumer cannot do itself. alloc.h documents this latch;
+probe-and-retry does not work through the adapter.
 
 ### 2.7 Queries
 
@@ -429,12 +441,13 @@ Observable contract, all behind feature detection, zero cost otherwise:
   uninitialized with its own origin.
 - Valgrind: opt-in with `ARENA_ENABLE_VALGRIND` and valgrind headers on
   the include path (not vendored; the no-third-party-dependencies rule).
-  Maps each block to its own memcheck mempool: create on block
+  Maps each block to its own memcheck mempool: create on first
   acquisition, MEMPOOL_ALLOC per allocation, MEMPOOL_TRIM within the
-  block on partial rewind, destroy when the block is recycled or
-  released. Per-block anchoring is required because MEMPOOL_TRIM is
-  range-based and one arena-wide pool would discard live chunks in
-  sibling blocks.
+  block on partial rewind and on retirement to the free list (the
+  anchor lives as long as the block does), destroy when the block is
+  released to the parent. Per-block anchoring is required because
+  MEMPOOL_TRIM is range-based and one arena-wide pool would discard
+  live chunks in sibling blocks.
 - Debug fills (`!defined(NDEBUG)`, no sanitizer): fresh allocations are
   filled with 0xA5, rewound and freed regions with 0x5A (jemalloc's
   junk convention). Under ASan the fill is skipped; poison is stronger.
@@ -472,8 +485,9 @@ installs no signal handlers, and holds no global mutable state.
 
 The following are programmer errors, not runtime conditions: passing a
 wrong old_size or align to realloc or free, realloc to size 0, ending
-temps out of order or after reset, using an allocation after its scope
-ended, freeing through an unequal allocator. Debug builds abort with a
+temps out of order or after reset, releasing or resizing a pre-scope
+allocation while a temp scope is open, using an allocation after its
+scope ended, freeing through an unequal allocator. Debug builds abort with a
 message where detection is affordable (generation and depth checks,
 cursor validation). Release builds do not pay for detection and the
 behavior is undefined. Malformed sizes (overflow, > PTRDIFF_MAX) are

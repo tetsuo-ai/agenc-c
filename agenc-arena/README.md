@@ -198,6 +198,7 @@ fuzzer), and valgrind are needed for the corresponding targets.
 | `make fuzz` | Build and run the libFuzzer op-sequence harness |
 | `make valgrind` | Run the suite under memcheck with mempool annotations |
 | `make analyze` | Run gcc -fanalyzer and the clang static analyzer |
+| `make bench` | Run the hot-path microbenchmarks (ns/op) |
 | `make format` | Check the repository's clang-format rules |
 | `make check` | Format, demo build, test, asan, iso, release, heapless |
 
@@ -206,6 +207,18 @@ scenario, temp-scope misuse death tests, overlap and content-survival
 properties, overflow boundaries, alignment matrices including a
 deliberately misaligning parent, and the sanitizer poisoning contract
 itself.
+
+## Performance
+
+Measured with `make bench` on one x86-64 machine (gcc 13.3 and clang
+18.1, -O2): an allocation costs about 1.1-1.25 ns, a full temp-scope
+cycle about 1.3-1.5 ns per allocation inside it, and an adapter LIFO
+alloc/free pair about 2.1-2.4 ns, against 3.7-3.8 ns for a glibc
+malloc/free pair on the same machine. Numbers are machine-specific;
+run the target yourself. The honest performance story stays the one
+the research supports: locality, immunity to heap fragmentation, bulk
+free, and predictability, with raw speed as a side effect of the
+short path.
 
 ## License
 

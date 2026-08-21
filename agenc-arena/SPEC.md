@@ -557,7 +557,26 @@ signal) or nonnull on the arena (a NULL arena is defined behavior), and
 alloc_align is not used (the align parameter may be 0 meaning default,
 which the attribute does not model).
 
-## 5. Constants
+## 5. Design properties worth relying on
+
+Three properties of this design are guarantees, not accidents, and
+consumers may build on them:
+
+- The generation counter is an epoch primitive: reset and deinit both
+  advance it, and deinit deliberately carries the advanced value into
+  the reinitialized state, so a stored pair of arena pointer and
+  generation detects staleness across both events with one integer
+  compare. Caches keyed on arena contents should key on the generation.
+- Temp scopes shed oversize blocks eagerly: a speculative pass that
+  allocated a huge buffer stops pinning that memory at arena_temp_end,
+  not at reset. Scratch-arena designs that retain every block until
+  reset do not give this bound.
+- LIFO reclaim through the adapter is header-free: exact sized
+  deallocation lets the arena verify last-ness with zero per-allocation
+  metadata, and wrong sizes degrade to a safe no-op instead of
+  corruption.
+
+## 6. Constants
 
 | Name | Value | Meaning |
 | --- | --- | --- |

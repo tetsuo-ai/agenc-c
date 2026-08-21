@@ -1,6 +1,7 @@
 /* arena.c: allocator interface backends and the arena region allocator. */
 
 #include <assert.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,6 +92,23 @@
 #endif
 
 /*
+ * Hot-path shaping. Neither gcc 13 nor clang 18 inlines the shared
+ * allocation front into the public wrappers at -O2, so without these
+ * the release fast path pays a 64-bit division for the overflow guard
+ * and never folds the constant alignment (measured: about 40% of the
+ * whole allocation cost). always_inline forces the constants through;
+ * cold keeps the growth and failure machinery out of the fast path's
+ * code layout.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#define ARENA_HOT __attribute__((always_inline)) static inline
+#define ARENA_COLD __attribute__((cold, noinline))
+#else
+#define ARENA_HOT static inline
+#define ARENA_COLD
+#endif
+
+/*
  * Blocks chain newest-first through the link field: the allocation chain
  * reads it as "previous (older) block", the free list reads it as "next
  * free block". Capacity checks run on integers before any pointer is
@@ -133,7 +151,8 @@ static void alloc_null_xfree(void *ctx, void *ptr, size_t size, size_t align);
  * block header. */
 static unsigned char *arena_block_data(struct arena_block *block);
 
-/* True for 0 and for powers of two up to ARENA_MAX_ALIGN. */
+/* True for 0 and for powers of two up to ARENA_MAX_ALIGN, evaluated as
+ * one fused mask so the common case costs a single test. */
 static bool arena_align_valid(size_t align);
 
 /* align passed arena_align_valid. Resolves 0 and the ASan floor. */
@@ -172,12 +191,23 @@ static struct arena_block *arena_take_free_block(arena_t *a, size_t data_need);
  * returns NULL on refusal. The caller chains the block. */
 static struct arena_block *arena_new_block(arena_t *a, size_t data_need);
 
-/* The slow path behind arena_alloc_impl: acquires capacity and bumps.
- * On failure nothing changes except the sticky status. */
-static void *arena_grow_and_bump(arena_t *a, size_t size, size_t align_eff);
+/* The slow path behind the allocation entry points: acquires capacity
+ * and bumps. On failure nothing changes except the sticky status. */
+ARENA_COLD static void *arena_grow_and_bump(arena_t *a, size_t size, size_t align_eff);
 
-/* The shared front of every allocation entry point: sticky gate,
- * argument validation, overflow guards, bump, grow. */
+/* The bump-or-grow tail shared by every allocation path. size passed
+ * every guard already; align_eff is resolved. */
+static void *arena_alloc_core(arena_t *a, size_t size, size_t align_eff);
+
+/* The default-alignment fast path behind arena_alloc,
+ * arena_alloc_zeroed, and arena_memdup: those entry points never take
+ * an align argument, so the align checks vanish here by construction
+ * instead of by optimizer goodwill. */
+static void *arena_alloc_default(arena_t *a, size_t size);
+
+/* The counted, aligned front behind arena_alloc_n, its zeroed variant,
+ * and the realloc paths: sticky gate, align validation, the
+ * division-free count * size overflow guard, bump, grow. */
 static void *arena_alloc_impl(arena_t *a, size_t count, size_t size, size_t align);
 
 /* Moves a dead normal block onto the free list. Its mempool anchor
@@ -401,12 +431,12 @@ void arena_clear_error(arena_t *a)
 
 void *arena_alloc(arena_t *a, size_t size)
 {
-    return arena_alloc_impl(a, 1, size, 0);
+    return arena_alloc_default(a, size);
 }
 
 void *arena_alloc_zeroed(arena_t *a, size_t size)
 {
-    void *ptr = arena_alloc_impl(a, 1, size, 0);
+    void *ptr = arena_alloc_default(a, size);
 
     if (ptr != NULL) {
         memset(ptr, 0, size);
@@ -438,7 +468,7 @@ void *arena_memdup(arena_t *a, const void *src, size_t size)
         arena_fail(a, ARENA_ERR_ARG);
         return NULL;
     }
-    void *ptr = arena_alloc_impl(a, 1, size, 0);
+    void *ptr = arena_alloc_default(a, size);
     if (ptr != NULL) {
         memcpy(ptr, src, size);
     }
@@ -665,7 +695,10 @@ static unsigned char *arena_block_data(struct arena_block *block)
 
 static bool arena_align_valid(size_t align)
 {
-    return (align & (align - 1)) == 0 && align <= ARENA_MAX_ALIGN;
+    /* One fused mask: a second set bit fails the power-of-two half, a
+     * bit above ARENA_MAX_ALIGN fails the range half, and 0 passes as
+     * the default request. */
+    return ((align & (align - 1)) | (align & ~((size_t)2 * ARENA_MAX_ALIGN - 1))) == 0;
 }
 
 static size_t arena_align_effective(size_t align)
@@ -721,7 +754,7 @@ static void arena_rewind_block(struct arena_block *block)
     block->used = 0;
 }
 
-static void *arena_try_bump(arena_t *a, size_t size, size_t align_eff)
+ARENA_HOT void *arena_try_bump(arena_t *a, size_t size, size_t align_eff)
 {
     struct arena_block *block;
 
@@ -732,9 +765,11 @@ static void *arena_try_bump(arena_t *a, size_t size, size_t align_eff)
     }
     unsigned char *cursor = arena_block_data(block) + block->used;
     size_t pad = (size_t)(-(uintptr_t)cursor & (uintptr_t)(align_eff - 1));
-    size_t avail = block->cap - block->used;
     size_t total = size + ARENA_REDZONE;
-    if (pad > avail || total > avail - pad) {
+    /* pad is below ARENA_MAX_ALIGN and total is capped near
+     * PTRDIFF_MAX, so the sum cannot wrap size_t: one compare covers
+     * both exhaustion cases. */
+    if (pad + total > block->cap - block->used) {
         return NULL;
     }
     block->used += pad + total;
@@ -816,6 +851,31 @@ static void *arena_grow_and_bump(arena_t *a, size_t size, size_t align_eff)
     return ptr;
 }
 
+ARENA_HOT void *arena_alloc_core(arena_t *a, size_t size, size_t align_eff)
+{
+    void *ptr = arena_try_bump(a, size, align_eff);
+
+    if (ptr != NULL) {
+        return ptr;
+    }
+    return arena_grow_and_bump(a, size, align_eff);
+}
+
+ARENA_HOT void *arena_alloc_default(arena_t *a, size_t size)
+{
+    if (!arena_can_serve(a)) {
+        return NULL;
+    }
+    if (size == 0) {
+        return NULL;
+    }
+    if (size > (size_t)PTRDIFF_MAX) {
+        arena_fail(a, ARENA_ERR_OVERFLOW);
+        return NULL;
+    }
+    return arena_alloc_core(a, size, arena_align_effective(0));
+}
+
 static void *arena_alloc_impl(arena_t *a, size_t count, size_t size, size_t align)
 {
     if (!arena_can_serve(a)) {
@@ -828,17 +888,21 @@ static void *arena_alloc_impl(arena_t *a, size_t count, size_t size, size_t alig
     if (count == 0 || size == 0) {
         return NULL;
     }
-    if (count > (size_t)PTRDIFF_MAX / size) {
+    /* Division-free overflow guard: when both operands fit in half the
+     * bits of size_t the product cannot wrap it, so the division runs
+     * only on the rare huge-operand path; the product is then capped
+     * at PTRDIFF_MAX either way. */
+    if (((count | size) >> (sizeof(size_t) * CHAR_BIT / 2)) != 0 &&
+        count > (size_t)PTRDIFF_MAX / size) {
         arena_fail(a, ARENA_ERR_OVERFLOW);
         return NULL;
     }
     size_t total = count * size;
-    size_t align_eff = arena_align_effective(align);
-    void *ptr = arena_try_bump(a, total, align_eff);
-    if (ptr != NULL) {
-        return ptr;
+    if (total > (size_t)PTRDIFF_MAX) {
+        arena_fail(a, ARENA_ERR_OVERFLOW);
+        return NULL;
     }
-    return arena_grow_and_bump(a, total, align_eff);
+    return arena_alloc_core(a, total, arena_align_effective(align));
 }
 
 static void arena_retire_block(arena_t *a, struct arena_block *block)

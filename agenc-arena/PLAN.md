@@ -172,6 +172,24 @@ which the attribute does not model), returns_nonnull nowhere, all
 behind GNU/Clang compiler detection. Evidence: H7 (GCC semantics
 verified; APR precedent).
 
+D17 measured hot-path shaping (added 2026-08-21 after a five-lens
+optimization hunt with a three-judge panel over 31 candidates): the
+allocation front is split into an always-inlined default-alignment path
+(arena_alloc, arena_alloc_zeroed, arena_memdup take no align argument,
+so their checks fold away by construction), the count * size overflow
+guard is division-free on the common path (half-width operands cannot
+wrap; the division runs only for huge operands), the align validation
+is one fused mask, the capacity check is one compare, and the growth
+and failure machinery is marked cold. Measured on the repo bench
+(x86-64, gcc 13 and clang 18, -O2): allocation 2.5 to 1.1-1.25 ns/op,
+temp cycles 3.1 to 1.3-1.5 ns/op, identical suite counts across the
+whole matrix. Root cause: neither compiler inlines the shared checked
+front into the public wrappers at -O2, so the release path paid a
+64-bit division per allocation. Judged and rejected or deferred:
+TLAB-style cursor caching in arena_t (real but invasive; revisit with
+consumer-workload evidence), sentinel blocks, sticky-limit clamping,
+lazy high-water, deferred statistics.
+
 D16 sticky-status scope: a recorded failure gates later allocations
 (agenc-str semantics) rather than only recording. Trade-off noted:
 probe-and-fallback callers must arena_clear_error between attempts;

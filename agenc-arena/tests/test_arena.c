@@ -25,7 +25,7 @@
 
 enum { TEST_SMALL = 16, TEST_MEDIUM = 64, TEST_LARGE = 128, TEST_FILL_BYTE = 0x5C };
 
-/* SPEC.md section 5: the public constants are stable API; pin them. */
+/* SPEC.md section 6: the public constants are stable API; pin them. */
 _Static_assert(ARENA_MIN_BLOCK_DEFAULT == 4096, "stable API");
 _Static_assert(ARENA_MAX_BLOCK_DEFAULT == 65536, "stable API");
 _Static_assert(ARENA_DEFAULT_ALIGN == _Alignof(max_align_t), "stable API");

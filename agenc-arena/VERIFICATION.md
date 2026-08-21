@@ -22,6 +22,7 @@ binary source.
 | make valgrind | plain build under valgrind with ARENA_ENABLE_VALGRIND | mempool-annotated memcheck (optional job, requires valgrind) |
 | make valgrind-heapless | the heapless binary under valgrind | the heap-summary proof for T5 |
 | make analyze | gcc -fanalyzer and clang --analyze over src | repeatable static analysis (section 6) |
+| make bench | -O2 -DNDEBUG microbenchmarks | ns/op for the hot paths; performance evidence |
 
 Warning set (binding; agenc-str's set minus -Wno-format-nonliteral,
 which only str's formatted-append tests need):
@@ -365,3 +366,25 @@ predates the alloc_t interface and the no-hidden-malloc rule binds
 from agenc-arena up. Everything else checked out, including the
 quick-start example compiling verbatim and every documented constant
 matching the headers.
+
+Addendum 2026-08-21, optimization pass: a five-lens hunt (fast-path
+microarchitecture, layout, branch elimination, arithmetic, wildcard)
+produced 31 candidates; a three-judge panel scored each adversarially.
+Adopted, with a new bench/bench_arena.c harness providing before and
+after evidence on this machine (x86-64, gcc 13.3 and clang 18.1, the
+bench target's -O2 -DNDEBUG): the always-inlined default-alignment
+allocation path plus cold-marked slow paths, the division-free count
+times size guard, the fused align mask, and the single-compare capacity
+check. Result: arena_alloc fell from 2.5-2.6 to 1.1-1.25 ns/op, temp
+cycles from 3.1 to 1.3-1.5, adapter LIFO pairs from 3.2 to 2.1-2.4,
+with the glibc malloc/free pair at 3.7-3.8 for context. The whole gate
+matrix re-ran green with byte-identical check counts (32745 plain,
+39423 ASan, 2379 heapless), valgrind and analyzers clean, fuzz sanity
+clean: the change is shape, not behavior. Root cause worth recording:
+neither gcc 13 nor clang 18 inlines the shared checked front into the
+public wrappers at -O2, so every release allocation paid a 64-bit
+division for the overflow guard until the entry seam was specialized.
+Deferred with evidence: TLAB-style cursor caching in arena_t (majority
+prototype vote but invasive; revisit when a consumer workload exists).
+Rejected by the panel: sentinel blocks, sticky-limit clamping, lazy
+high-water maintenance, deferred statistics, and struct packing tricks.

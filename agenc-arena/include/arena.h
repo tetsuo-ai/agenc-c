@@ -86,6 +86,11 @@ struct arena_block;
  * arena_clear_error or arena_reset. Queries, temp scopes (begin and
  * end), the adapter's xfree, reset, trim, and deinit remain available
  * while an error is sticky.
+ *
+ * The generation field is a supported epoch primitive: reset and
+ * deinit both advance it, and deinit carries the advanced value into
+ * the reinitialized state, so a stored arena pointer plus generation
+ * detects staleness across both events with one integer compare.
  */
 typedef struct arena {
     alloc_t parent;

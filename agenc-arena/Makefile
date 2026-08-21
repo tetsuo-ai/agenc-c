@@ -20,10 +20,12 @@ FUZZ_SRC = tests/fuzz_arena.c
 FUZZ_BIN = tests/fuzz_arena
 DEMO_SRC = main.c
 DEMO_BIN = arena_demo
-FORMAT_FILES = $(wildcard include/*.h src/*.c tests/*.c main.c)
+BENCH_SRC = bench/bench_arena.c
+BENCH_BIN = bench/bench_arena
+FORMAT_FILES = $(wildcard include/*.h src/*.c tests/*.c bench/*.c main.c)
 
 .PHONY: test asan iso release heapless fuzz valgrind valgrind-heapless analyze format check \
-	demo clean
+	demo bench clean
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)
@@ -81,6 +83,12 @@ demo: $(DEMO_BIN)
 $(DEMO_BIN): $(DEMO_SRC) $(SRC) $(HDRS) Makefile
 	$(ARENA_COMPILE) $(LDFLAGS) -o $@ $(DEMO_SRC) $(SRC) $(LDLIBS)
 
+bench: $(BENCH_BIN)
+	./$(BENCH_BIN)
+
+$(BENCH_BIN): $(BENCH_SRC) $(SRC) $(HDRS) Makefile
+	$(ARENA_COMPILE) -O2 -DNDEBUG $(LDFLAGS) -o $@ $(BENCH_SRC) $(SRC) $(LDLIBS)
+
 valgrind-heapless: $(HEAPLESS_BIN)
 	$(VALGRIND) --error-exitcode=1 --leak-check=full --errors-for-leak-kinds=all \
 		--child-silent-after-fork=yes ./$(HEAPLESS_BIN)
@@ -96,4 +104,4 @@ check: format $(DEMO_BIN) test asan iso release heapless
 
 clean:
 	rm -f $(TEST_BIN) $(ASAN_BIN) $(ISO_BIN) $(RELEASE_BIN) $(HEAPLESS_BIN) \
-		$(VG_BIN) $(FUZZ_BIN) $(DEMO_BIN) tests/crash-*
+		$(VG_BIN) $(FUZZ_BIN) $(DEMO_BIN) $(BENCH_BIN) tests/crash-*

@@ -92,11 +92,12 @@ T2 lifetime discipline (use-after-free class):
 
 T3 overlap and content integrity (silent-corruption class):
 
-- checksum survival: randomized op sequences (alloc sizes 1..8KB mixed
-  with temps and reallocs); every allocation is filled with a
-  pattern derived from its index; before every subsequent op and at the
-  end, all live allocations verify their pattern. Catches overlap,
-  header clobbering, and bad rewinds without sanitizer help.
+- checksum survival: seeded randomized op sequences (alloc sizes up to
+  600 bytes in the suite loop, up to 8KB in the fuzz harness, mixed with
+  temps, reallocs, and adapter frees); every allocation is filled with a
+  pattern derived from its fill seed; after every op all live
+  allocations verify their pattern. Catches overlap, header clobbering,
+  and bad rewinds without sanitizer help.
 - disjointness: for every pair of live allocations, [p, p+size) ranges
   do not intersect (checked on a bounded window of recent allocations).
 - realloc matrix: grow/shrink in place when last; grow forcing a block
@@ -122,12 +123,14 @@ T4 OOM (crash and leak class), SQLite fail-Nth methodology:
 
 T5 heap-disabled run (the plan's done-when gate):
 
-- a dedicated test main links the suite's core cases against
-  arena_init_fixed over a static `_Alignas(max_align_t) unsigned char`
-  buffer, with alloc_null as the only other allocator in the binary.
-  The counting allocator asserts zero parent calls. This is the proof
-  that a fixed-buffer arena can run the test suite with the heap
-  disabled.
+- a dedicated build of the same test source (make heapless) runs every
+  heap-free case against arena_init_fixed over static
+  `_Alignas(max_align_t) unsigned char` buffers, with alloc_null as the
+  only other allocator exercised. The no-heap claim is proven by
+  construction (fixed arenas cannot reach a real parent) and verified
+  with valgrind's heap summary on the heapless binary, which shows only
+  the stdio buffer allocation. This is the proof that a fixed-buffer
+  arena can run the test suite with the heap disabled.
 
 T6 interface conformance (both directions):
 

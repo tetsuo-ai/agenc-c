@@ -1,4 +1,4 @@
-LIBS = agenc-str agenc-arena
+LIBS = agenc-str agenc-arena agenc-test
 
 .PHONY: check conventions clean
 

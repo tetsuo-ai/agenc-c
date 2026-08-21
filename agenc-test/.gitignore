@@ -1,0 +1,6 @@
+tests/test_test
+tests/test_test_asan
+tests/test_test_iso
+tests/test_test_release
+tests/*_obj
+*.o

@@ -23,7 +23,7 @@ layers above it. The full plan is [LIBRARIES.md](LIBRARIES.md).
 | --- | --- | --- | --- |
 | [agenc-str](agenc-str/) | 0 | done | Predictable growable strings and views; the reference implementation for the family's style |
 | [agenc-arena](agenc-arena/) | 1 | done | Region allocator with reset semantics, plus the `alloc_t` interface every later library allocates through |
-| [agenc-test](agenc-test/) | 2 | planned | Single-header test harness |
+| [agenc-test](agenc-test/) | 2 | done | Single-header unit test harness: auto-registration, typed assertions, fixtures, fork isolation, TAP |
 | [agenc-err](agenc-err/) | 3 | planned | Small error type with a stable numeric code space |
 | [agenc-bin](agenc-bin/) | 4 | planned | Bounds-checked binary reader and writer for hostile input |
 | [agenc-hash](agenc-hash/) | 5 | planned | Fast hash, SipHash for untrusted keys, PCG-style PRNG |

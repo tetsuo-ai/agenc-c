@@ -80,13 +80,15 @@ typedef void *(*alloc_xalloc_fn)(void *ctx, size_t size, size_t align);
  * Success returns a pointer, possibly equal to ptr and possibly moved,
  * to at least new_size bytes at the same effective alignment; bytes
  * [0, min(old_size, new_size)) are preserved, bytes beyond old_size are
- * uninitialized, and a moved block invalidates the old pointer. Failure
+ * uninitialized, and a moved block invalidates the old pointer. A
+ * new_size above PTRDIFF_MAX must fail with NULL, like xalloc. Failure
  * returns NULL and the old block is untouched, still valid, still owned
  * by the caller, and must still be released eventually. Shrinking may
  * fail like any other call, but a failed shrink is always recoverable
- * because the old block still holds all the data; the built-in backends
- * never fail a shrink. Implementations should resize in place when they
- * can; relocation is always permitted.
+ * because the old block still holds all the data; the libc and null
+ * backends never fail a shrink (an arena adapter can, through its
+ * sticky latch or its move path). Implementations should resize in
+ * place when they can; relocation is always permitted.
  */
 typedef void *(*alloc_xrealloc_fn)(void *ctx, void *ptr, size_t old_size, size_t new_size,
                                    size_t align);

@@ -229,14 +229,18 @@ the cap. Guard size + align - 1 and count * size with subtraction and
 division forms (APR CVE-2009-2412 and glibc's 2026 memalign CVE are this
 bug class).
 
-H4. Do not assume parent blocks are more than max_align_t aligned, and on
-weak-alignment libcs (musl, Windows) not even that for small blocks (WG14
-N2293). Run the round-up on every allocation including the first.
-aligned_alloc cannot be the over-alignment path: MSVC does not provide it.
+H4. Do not assume parent blocks are more than max_align_t aligned, and
+some implementations return even less for small blocks (WG14 N2293
+documents the strong/weak alignment split among malloc implementations;
+32-bit glibc and the Windows heap are the classic under-max_align_t
+examples). Run the round-up on every allocation including the first.
+aligned_alloc cannot be the over-alignment path: MSVC does not provide
+it.
 
 H5. The fixed-buffer backend has a real effective-type wrinkle: C11 has
 no rule that a declared char array provides storage for typed objects
-(CERT EXP39-C), unlike C++ P0593. Practice (Wellons, every shipping
+(C11 6.5p6-7; CERT EXP39-C covers the adjacent incompatible-access
+rule), unlike C++ P0593. Practice (Wellons, every shipping
 fixed-buffer allocator) relies on the de-facto guarantee that compilers
 do not exploit this for raw character buffers. Adopted stance: accept
 void *, document the intended _Alignas(max_align_t) unsigned char array

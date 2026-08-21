@@ -121,8 +121,8 @@ blocks; every size capped at PTRDIFF_MAX with subtraction/division
 guards. Evidence: F2, H3; Tofte retrospective (no universal page size,
 so per-arena knobs).
 
-D6 retention: reset keeps normal blocks (first stays current, rest to
-the per-arena free list) and returns oversize blocks; temp-end recycles
+D6 retention: reset keeps normal blocks (the oldest normal stays
+current, the rest go to the per-arena free list) and returns oversize blocks; temp-end recycles
 the blocks it vacates to the free list; arena_trim releases the free
 list; no cross-arena cache ever. Evidence: F3, F9; APR/nginx/Hanson
 retention practice; Hanson's global freechunks as the landmine.
@@ -165,9 +165,12 @@ arena, following the ds_vec_/ds_map_/ds_list_ precedent. LIBRARIES.md
 places the interface inside agenc-arena; a separate repo for four
 typedefs is not worth the dependency edge.
 
-D15 attributes: malloc/alloc_size/alloc_align on the bump entry points
-behind version guards, alloc_size only on realloc, returns_nonnull
-nowhere. Evidence: H7 (GCC semantics verified; APR precedent).
+D15 attributes: malloc plus alloc_size on the four bump entry points,
+alloc_size alone on memdup and realloc (their results carry caller
+bytes), no alloc_align (the align parameter may be 0 meaning default,
+which the attribute does not model), returns_nonnull nowhere, all
+behind GNU/Clang compiler detection. Evidence: H7 (GCC semantics
+verified; APR precedent).
 
 D16 sticky-status scope: a recorded failure gates later allocations
 (agenc-str semantics) rather than only recording. Trade-off noted:
@@ -222,9 +225,10 @@ cycles.
 
 M5 adapter and conformance: arena_allocator, LIFO rollback xfree,
 checked-arg parent proving the arena's own vtable calls are exact.
-Tests: T6 adapter rows, T7. Gate: the full suite runs twice, once with
-libc parent and once with the arena's own adapter as parent (arena on
-arena), both green.
+Tests: T6 adapter rows, T7. Gate: a representative workout runs green
+under the libc, tracking, and arena-adapter parents, plus a dedicated
+arena-on-arena test; the full suite runs once with mixed parents per
+test.
 
 M6 checking builds: ASan poisoning with redzones, MSan marks, debug
 fills, Valgrind opt-in, ARENA_DISABLE_SANITIZER_HOOKS. Tests: T2 poison

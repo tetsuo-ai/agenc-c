@@ -290,6 +290,12 @@ void arena_init_fixed(arena_t *a, void *buffer, size_t size)
         arena_fail(a, ARENA_ERR_ARG);
         return;
     }
+    if (size > (size_t)PTRDIFF_MAX) {
+        /* A larger buffer would let block offsets exceed PTRDIFF_MAX,
+         * reopening the wrap hazards every other entry point caps. */
+        arena_fail(a, ARENA_ERR_OVERFLOW);
+        return;
+    }
     a->committed = size;
     unsigned char *base = buffer;
 #if defined(ARENA_STRICT_ISO) && (defined(__GNUC__) || defined(__clang__))
@@ -689,6 +695,7 @@ static bool arena_can_serve(const arena_t *a)
 
 static void arena_mark_live(struct arena_block *block, unsigned char *ptr, size_t size)
 {
+    assert(block != NULL && ptr != NULL);
     ARENA_UNPOISON(ptr, size); /* exact user size, never padded */
     ARENA_FILL_ALLOC(ptr, size);
     ARENA_MSAN_ALLOCATED(ptr, size);
@@ -716,8 +723,10 @@ static void arena_rewind_block(struct arena_block *block)
 
 static void *arena_try_bump(arena_t *a, size_t size, size_t align_eff)
 {
-    struct arena_block *block = a->current;
+    struct arena_block *block;
 
+    assert(a != NULL);
+    block = a->current;
     if (block == NULL) {
         return NULL;
     }
@@ -878,8 +887,10 @@ static void arena_pop_to_block(arena_t *a, struct arena_block *stop)
 
 static bool arena_is_last_alloc(const arena_t *a, const void *ptr, size_t size, size_t *out_offset)
 {
-    struct arena_block *block = a->current;
+    struct arena_block *block;
 
+    assert(a != NULL && ptr != NULL && out_offset != NULL);
+    block = a->current;
     if (block == NULL || size > block->used) {
         return false;
     }

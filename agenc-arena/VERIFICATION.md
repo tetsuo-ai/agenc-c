@@ -14,53 +14,58 @@ binary source.
 | Target | Configuration | Purpose |
 | --- | --- | --- |
 | make test | -std=c11 -pedantic-errors, strict warnings, asserts on | primary suite |
-| make asan | -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all | memory and UB evidence |
-| make iso | strictest ISO-conformance variant, asserts on | portability posture |
+| make asan | -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all | memory and UB evidence |
+| make iso | -O2 with the ARENA_STRICT_ISO launder barrier, asserts on | portability posture under optimization |
 | make release | -O3 -DNDEBUG -D_FORTIFY_SOURCE=3 | production optimization and assert-off behavior |
+| make heapless | plain build with ARENA_TEST_FIXED_ONLY | the no-heap proof (T5) |
 | make fuzz | clang -fsanitize=fuzzer,address,undefined | op-sequence fuzzing (section 5) |
 | make valgrind | plain build under valgrind with ARENA_ENABLE_VALGRIND | mempool-annotated memcheck (optional job, requires valgrind) |
+| make valgrind-heapless | the heapless binary under valgrind | the heap-summary proof for T5 |
+| make analyze | gcc -fanalyzer and clang --analyze over src | repeatable static analysis (section 6) |
 
-Warning set (from agenc-str, binding):
+Warning set (binding; agenc-str's set minus -Wno-format-nonliteral,
+which only str's formatted-append tests need):
 `-Wall -Wextra -Werror -Wconversion -Wshadow -Wformat=2
--Wno-format-nonliteral -Wnull-dereference -Wstrict-prototypes
--Wmissing-prototypes`.
+-Wnull-dereference -Wstrict-prototypes -Wmissing-prototypes`.
 
 UBSan notes: the asan target includes `-fsanitize=undefined`, which
 covers pointer-overflow; that check specifically catches cursor
 arithmetic mistakes of the `cur + n > end` shape.
 
-`make check` = format + test + asan + iso + release. Fuzz and valgrind
-run on demand and before release tags.
+`make check` = format + demo build + test + asan + iso + release +
+heapless. Fuzz, valgrind, and analyze run on demand and before release
+tags.
 
-Both GCC and Clang should pass the full matrix; CI or a local script runs
-the matrix once per compiler (`CC=gcc`, `CC=clang`).
+Both GCC and Clang must pass the full matrix; the matrix is run once
+per compiler (`CC=gcc`, `CC=clang`). There is no CI service yet; runs
+are manual and recorded in the ledger.
 
 ## 2. Test suite structure
 
 `tests/test_arena.c`, agenc-str harness style: single EXPECT macro that
-prints file:line and aborts, named constants in an enum, deterministic
-cases first, seeded randomized cases second with the seed printed on
-failure.
+prints file:line and aborts, named constants in an enum, and seeded
+randomized property loops (one per backend) whose failures print the
+seed and op index.
 
 The parent-allocator vtable is the fault-injection seam. The suite
 defines test allocators in plain code, no library test hooks needed:
 
-- counting allocator: wraps alloc_libc, counts calls, records live
-  bytes, detects leaks and double frees by tracking outstanding blocks.
-- fail-Nth allocator: fails the Nth allocation (transient: only that
-  one; persistent: that one and all later ones).
-- misaligning allocator: returns pointers offset from malloc by 8 to
-  simulate weak-alignment parents.
-- checked-arg allocator: asserts the size/align arguments the arena
-  passes back on xfree/xrealloc match what was allocated (verifies the
-  arena honors the interface contract as a caller).
+- the tracking allocator (one implementation wrapping malloc): counts
+  allocating calls, injects fail-Nth OOM (transient: only call N;
+  persistent: call N and all later ones), detects leaks and double
+  frees by tracking outstanding blocks, and asserts that the size and
+  align the arena passes back on xfree match the allocating call
+  exactly (the arena honors the interface contract as a caller).
+- the misaligning allocator: returns pointers offset from malloc by 8
+  to simulate weak-alignment parents.
 
 ## 3. Test groups, ordered by bug-class severity
 
 T1 arithmetic guards (memory-corruption class):
 
 - size = 0, 1, PTRDIFF_MAX - 1, PTRDIFF_MAX, PTRDIFF_MAX + 1 (as
-  size_t), SIZE_MAX, at every entry point.
+  size_t), SIZE_MAX, across every allocating arena entry point (alloc,
+  zeroed, alloc_n, memdup, realloc) and the libc backend.
 - align = each power of two 1..ARENA_MAX_ALIGN, plus 0 (default), 3, 6,
   SIZE_MAX/2 + 1 (non-power-of-two and huge values are violations or
   failures per SPEC 4.4; the runtime-condition ones must fail cleanly).
@@ -87,8 +92,8 @@ T2 lifetime discipline (use-after-free class):
   (compare arena_used and committed before/after; loop 1000 iterations
   of begin/alloc-various/end and assert committed stays flat, proving
   block recycling instead of growth).
-- reset: retains first normal block, frees oversize blocks, clears
-  status, preserves high_water, keeps the arena usable.
+- reset: retains the oldest normal block, frees oversize blocks,
+  clears status, preserves high_water, keeps the arena usable.
 
 T3 overlap and content integrity (silent-corruption class):
 
@@ -128,23 +133,25 @@ T5 heap-disabled run (the plan's done-when gate):
   `_Alignas(max_align_t) unsigned char` buffers, with alloc_null as the
   only other allocator exercised. The no-heap claim is proven by
   construction (fixed arenas cannot reach a real parent) and verified
-  with valgrind's heap summary on the heapless binary, which shows only
-  the stdio buffer allocation. This is the proof that a fixed-buffer
-  arena can run the test suite with the heap disabled.
+  with valgrind's heap summary on the heapless binary (make
+  valgrind-heapless), which shows only the stdio buffer allocation.
+  This is the proof that a fixed-buffer arena can run the test suite
+  with the heap disabled.
 
 T6 interface conformance (both directions):
 
 - alloc_libc: contract table (zero size, NULL free, alignment up to
-  max_align_t, over-aligned refusal, realloc preservation) plus a
-  differential check against plain malloc behavior.
+  max_align_t, over-aligned refusal, realloc prefix preservation on
+  grow and shrink, the value-copy identity rule).
 - alloc_null: everything fails cleanly, xfree accepts NULL and non-NULL.
 - arena_allocator adapter: passes the same contract table; LIFO
   alloc/free pairs leave used unchanged; xfree of a non-last allocation
-  or with a garbage size is a harmless no-op. The adapter itself stays
-  usable after arena_reset; the violation is using memory handed out
-  before the reset, covered by the T2 dereference death test.
-- vtable-caller correctness: the checked-arg allocator runs under the
-  whole suite, proving the arena always passes exact old sizes and
+  or with a garbage size is a harmless no-op. The adapter stays usable
+  after arena_reset (asserted deterministically); the violation is
+  using memory handed out before the reset, covered by the T2
+  poison probes and dereference death tests.
+- vtable-caller correctness: the tracking allocator runs under every
+  growing-arena test, proving the arena always passes exact sizes and
   aligns to its parent.
 
 T7 statistics and alignment properties:
@@ -158,8 +165,7 @@ T7 statistics and alignment properties:
 ## 4. NDEBUG and release behavior
 
 The release target runs the full suite minus death tests (debug-only
-detection). A dedicated case proves allocation failure handling is
-identical with NDEBUG (no assert doubles as error handling), and that
+detection). The failure-handling cases run unchanged under NDEBUG (no assert doubles as error handling), and that
 debug fills are absent (contents of fresh allocations are simply
 unspecified; the test only proves no crash and correct contracts).
 
@@ -180,16 +186,22 @@ unspecified; the test only proves no crash and correct contracts).
   directly).
 - both backends fuzzed: growing (libc parent, budget-capped via a
   limiting parent allocator) and fixed (static buffer).
-- corpus seeds: empty input, minimal one-op inputs, a temp-heavy
-  sequence, an oversize-heavy sequence, regression inputs from every
-  bug ever found (kept in tests/corpus/).
+- corpus seeds: an empty input, backend-selector minimal inputs, true
+  one-op inputs per backend, a temp-heavy sequence, and an
+  oversize-heavy sequence (kept in tests/corpus/). Regression inputs
+  join them for fuzz-reachable bugs; none to date (the addendum-1
+  temp-rollback defect is contract-illegal by construction in this
+  harness, so it is guarded by a unit death test instead).
 - PR budget: a short fixed run (about a minute) in check-adjacent use;
   longer campaigns before tags.
 
 ## 6. Static analysis
 
-- gcc -fanalyzer over src/arena.c with normal compile options.
-- clang --analyze likewise.
+- make analyze: gcc -fanalyzer and clang --analyze over src/arena.c
+  with the full warning set. The test files are analyzed ad hoc only:
+  gcc's analyzer reports a disproven false positive in the randomized
+  verifier (contradicted by a clean MSan run), so they stay out of the
+  gating target.
 - clang-format --dry-run --Werror as the format gate (agenc-str rules).
 - findings triaged, not counted; suppressions localized with reasons.
 
@@ -235,10 +247,14 @@ Filled in and reported at every milestone claim and before any tag.
 
 ## 10. Ledger: initial implementation, 2026-08-20
 
+Superseded counts: the addenda below record how the suite grew; the
+current counts live in the final addendum.
+
 Toolchain: gcc 13.3.0, clang 18.1.3, clang-format 18.1.3, valgrind
-(Ubuntu 24.04, x86_64, glibc). Suite sizes: 27242 checks per full
-variant, 33907 under ASan (poisoning probes added), 27236 in release
-(death tests are debug-only), 325 in the heapless binary.
+(Ubuntu 24.04, x86_64, glibc). Suite sizes at this initial ledger:
+27242 checks per full variant, 33907 under ASan (poisoning probes
+added), 27236 in release (death tests are debug-only), 325 in the
+heapless binary.
 
 | Evidence | State |
 | --- | --- |
@@ -249,11 +265,11 @@ variant, 33907 under ASan (poisoning probes added), 27236 in release
 | ISO variant suite | passed (make iso, ARENA_STRICT_ISO launder path, both compilers) |
 | Release NDEBUG FORTIFY suite | passed (make release, -O3 -D_FORTIFY_SOURCE=3, both compilers) |
 | Heap-disabled fixed-buffer run (T5) | passed (make heapless; valgrind heap summary: 1 alloc total, the stdio buffer, none from arena code) |
-| OOM fail-Nth loops, transient + persistent (T4) | passed (4 scenarios, run-until-clean, leak and consistency checks each injection) |
+| OOM fail-Nth loops, transient + persistent (T4) | passed (7 scenarios as of the completeness addendum, run-until-clean, leak and consistency checks each injection) |
 | Checksum/overlap property loop (T3) | passed (fill-pattern survival inside the suite and the fuzz harness's shadow model) |
 | Fuzz run | passed (libFuzzer, fuzzer+address+undefined, 60 s sanity 122k execs, then 3602 s campaign 495,690 execs, both backends, zero findings, no artifacts) |
 | Valgrind mempool job | passed (make valgrind, --error-exitcode=1 --leak-check=full, 0 errors, 0 leaks; caught and fixed two annotation bugs during M6) |
-| gcc -fanalyzer | passed (src and tests, zero findings) |
+| gcc -fanalyzer | passed (src via make analyze; tests analyzed ad hoc with one disproven false positive) |
 | clang --analyze | passed (src, zero findings) |
 | Death tests (debug violation detection) | passed (fork-based, temp out-of-order and temp-after-reset abort via SIGABRT) |
 | Revert-sensitivity of new regression tests | passed for the two valgrind-layer fixes (errors reproduced before the fix, clean after); standing discipline for future bugs |
@@ -297,3 +313,46 @@ violation is using pre-reset memory, covered by the T2 death test).
 Suite grew from 27278 to 32615 checks (heapless 2364); full matrix
 re-run green under gcc and clang, valgrind 0 errors, analyzers clean,
 fuzz sanity clean.
+
+Addendum 2026-08-20, final conformance pass: three fresh verification
+agents (SPEC-to-code clause by clause, this document and PLAN.md promise
+by promise, and an adversarial code review with compiled probes and a
+600-seed randomized sweep) plus a source fact-check of RESEARCH.md and
+the READMEs, followed by fixes for everything found.
+
+Current counts (both gcc 13.3 and clang 18.1): 32745 checks in the
+plain and iso variants, 39423 under ASan, 32736 in release (the delta
+is the debug-only death tests), 2379 in the heapless binary.
+
+Code changes this pass: arena_init_fixed caps its size at PTRDIFF_MAX
+(the one contract asymmetry the adversarial review found; the wrap it
+closes is reachable only on ILP32); the fuzz harness no longer
+initializes the arena inside an assert; leaf helpers assert their
+documented preconditions. Test additions closed every remaining unmet
+bullet: pinned constants, the full huge-size and align tables at every
+allocating entry point, the combined size-plus-align overflow, the
+use-after-reset poison probe and dereference death test, shrink of a
+non-last allocation, adapter-after-reset, the inert NULL temp scope,
+and the seeded property loops described in section 2. The corpus now
+matches its own description (empty seed, one-op seeds per backend).
+
+Fuzz campaign, re-run on the shipped harness: 899195 executions in
+3601 seconds under fuzzer,address,undefined, zero findings, no crash
+artifacts. This re-earns PLAN.md's M7 gate against the current code.
+
+Revert-sensitivity record: the arena_init_fixed cap test was proven
+red against the guard-removed source. Two earlier fixes are recorded
+as analysis-backed rather than revert-provable, with reasons: the
+adapter garbage-size test cannot be made to fail without the guard
+because no wrapping size can alias the cursor equation through the
+public API (the guard bounds the arithmetic and keeps the ILP32 case
+trivially safe), and the libc failed-shrink fallback is unreachable on
+glibc, which never fails a shrink in practice.
+
+Source fact-check outcome: the standards cluster verified 11 of 13
+claims against primary sources; the one material contradiction
+(RESEARCH.md attributed weak malloc alignment to musl against WG14
+N2293's actual classification) is corrected, and one citation stretch
+(EXP39-C cited for the storage-provision gap) now cites C11 6.5
+directly. The remaining fact-check categories completed without
+material findings beyond these.

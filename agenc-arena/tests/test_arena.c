@@ -25,6 +25,14 @@
 
 enum { TEST_SMALL = 16, TEST_MEDIUM = 64, TEST_LARGE = 128, TEST_FILL_BYTE = 0x5C };
 
+/* SPEC.md section 5: the public constants are stable API; pin them. */
+_Static_assert(ARENA_MIN_BLOCK_DEFAULT == 4096, "stable API");
+_Static_assert(ARENA_MAX_BLOCK_DEFAULT == 65536, "stable API");
+_Static_assert(ARENA_DEFAULT_ALIGN == _Alignof(max_align_t), "stable API");
+_Static_assert(ARENA_MAX_ALIGN == 65536, "stable API");
+_Static_assert(ARENA_FIXED_OVERHEAD == 64, "stable API");
+_Static_assert(ARENA_ASAN_REDZONE == 16, "stable API");
+
 static struct {
     int run;
 } test_ctx;
@@ -147,6 +155,7 @@ static void test_fixed_misaligned_starts(void)
 static void test_fixed_tiny_buffers(void)
 {
     static _Alignas(max_align_t) unsigned char storage[ARENA_FIXED_OVERHEAD + 64];
+    volatile size_t fixed_over_cap = (size_t)PTRDIFF_MAX + 1;
     arena_t a;
     void *ptr;
     size_t size;
@@ -177,6 +186,11 @@ static void test_fixed_tiny_buffers(void)
     EXPECT(arena_ok(&a));
     ptr = arena_alloc(&a, 8);
     EXPECT(ptr != NULL);
+    arena_deinit(&a);
+
+    /* A size above PTRDIFF_MAX is refused before any buffer access. */
+    arena_init_fixed(&a, storage, fixed_over_cap);
+    EXPECT(arena_status(&a) == ARENA_ERR_OVERFLOW);
     arena_deinit(&a);
 }
 
@@ -209,7 +223,10 @@ static void test_arg_and_overflow_guards(void)
     volatile size_t huge_count = SIZE_MAX / 2;
     volatile size_t over_count = (size_t)PTRDIFF_MAX / TEST_SMALL + 1;
     volatile size_t guard_max = (size_t)PTRDIFF_MAX;
+    volatile size_t near_cap = (size_t)PTRDIFF_MAX - 1;
+    volatile size_t huge_align = SIZE_MAX / 2 + 1;
     arena_t a;
+    arena_t growing;
 
     arena_init_fixed(&a, buffer, sizeof(buffer));
 
@@ -218,8 +235,12 @@ static void test_arg_and_overflow_guards(void)
     EXPECT(arena_status(&a) == ARENA_ERR_ARG);
     arena_clear_error(&a);
 
-    /* A power of two above ARENA_MAX_ALIGN records ARENA_ERR_ARG. */
+    /* A power of two above ARENA_MAX_ALIGN records ARENA_ERR_ARG, up
+     * to the extreme SIZE_MAX / 2 + 1. */
     EXPECT(arena_alloc_n(&a, 1, TEST_SMALL, ARENA_MAX_ALIGN * 2) == NULL);
+    EXPECT(arena_status(&a) == ARENA_ERR_ARG);
+    arena_clear_error(&a);
+    EXPECT(arena_alloc_n(&a, 1, TEST_SMALL, huge_align) == NULL);
     EXPECT(arena_status(&a) == ARENA_ERR_ARG);
     arena_clear_error(&a);
 
@@ -244,11 +265,32 @@ static void test_arg_and_overflow_guards(void)
     EXPECT(arena_status(&a) == ARENA_ERR_OVERFLOW);
     arena_clear_error(&a);
 
-    /* A size that passes the product guard but dwarfs the buffer fails
-     * on capacity, never on overflow. */
+    /* Sizes that pass the product guard but dwarf the buffer fail on
+     * capacity, never on overflow, right up to the cap boundary. */
     EXPECT(arena_alloc_n(&a, 1, guard_max, 0) == NULL);
     EXPECT(arena_status(&a) == ARENA_ERR_ALLOC);
     arena_clear_error(&a);
+    EXPECT(arena_alloc(&a, near_cap) == NULL);
+    EXPECT(arena_status(&a) == ARENA_ERR_ALLOC);
+    arena_clear_error(&a);
+
+    /* The huge-size table holds at every allocating entry point. */
+    EXPECT(arena_alloc_zeroed(&a, huge_size) == NULL);
+    EXPECT(arena_status(&a) == ARENA_ERR_OVERFLOW);
+    arena_clear_error(&a);
+    EXPECT(arena_memdup(&a, buffer, over_cap) == NULL);
+    EXPECT(arena_status(&a) == ARENA_ERR_OVERFLOW);
+    arena_clear_error(&a);
+    EXPECT(arena_realloc(&a, NULL, 0, huge_size, 0) == NULL);
+    EXPECT(arena_status(&a) == ARENA_ERR_OVERFLOW);
+    arena_clear_error(&a);
+
+    /* A near-cap size combined with the largest align overflows the
+     * block-sizing computation on a growing arena. */
+    EXPECT(arena_init_sized(&growing, alloc_null(), 4096, 65536) == ARENA_OK);
+    EXPECT(arena_alloc_n(&growing, 1, guard_max, ARENA_MAX_ALIGN) == NULL);
+    EXPECT(arena_status(&growing) == ARENA_ERR_OVERFLOW);
+    arena_deinit(&growing);
 
     /* An ordinary product inside the guard succeeds. */
     EXPECT(arena_alloc_n(&a, 2, TEST_SMALL, 0) != NULL);
@@ -300,6 +342,8 @@ static void test_queries_and_names(void)
     arena_reset(NULL);
     arena_trim(NULL);
     arena_clear_error(NULL);
+    arena_temp_end(arena_temp_begin(NULL)); /* inert scope */
+    EXPECT(arena_realloc(NULL, NULL, 0, TEST_SMALL, 0) == NULL);
 
     EXPECT(strcmp(arena_status_name(ARENA_OK), "ARENA_OK") == 0);
     EXPECT(strcmp(arena_status_name(ARENA_ERR_ARG), "ARENA_ERR_ARG") == 0);
@@ -638,6 +682,7 @@ static void run_random_ops(arena_t *a, uint32_t seed)
             size_t pick = live_count;
             unsigned char *moved;
             size_t verify;
+            size_t b;
 
             while (pick > 0 && live[pick - 1].level != depth) {
                 pick--;
@@ -655,7 +700,7 @@ static void run_random_ops(arena_t *a, uint32_t seed)
                 break; /* the old entry stays valid and verified */
             }
             verify = live[pick].size < size ? live[pick].size : size;
-            for (size_t b = 0; b < verify; b++) {
+            for (b = 0; b < verify; b++) {
                 if (moved[b] != (unsigned char)(live[pick].fill + (unsigned char)b)) {
                     rand_fail(seed, op, "realloc lost contents");
                 }
@@ -832,9 +877,24 @@ static void violate_use_after_rewind(void)
     stale[0] = 1; /* use after rewind: ASan must catch this */
 }
 
+static void violate_use_after_reset(void)
+{
+    arena_t a;
+    volatile unsigned char *stale;
+
+    arena_init(&a, alloc_libc());
+    stale = arena_alloc(&a, TEST_MEDIUM);
+    if (stale == NULL) {
+        return; /* no allocation, no violation: the parent sees exit 0 */
+    }
+    arena_reset(&a);
+    stale[0] = 1; /* use after reset: ASan must catch this */
+}
+
 static void test_use_after_rewind_death(void)
 {
     expect_nonzero_exit(violate_use_after_rewind);
+    expect_nonzero_exit(violate_use_after_reset);
 }
 
 #endif /* TEST_HAS_ASAN && !ARENA_TEST_FIXED_ONLY */
@@ -1333,6 +1393,15 @@ static void test_realloc_matrix(void)
     t.persistent = false;
     arena_clear_error(&a);
 
+    /* Shrink of a non-last allocation takes the move path and keeps
+     * the surviving prefix. */
+    moved = arena_realloc(&a, ptr, 1000, 100, 0);
+    EXPECT(moved != NULL);
+    EXPECT(moved != ptr);
+    for (idx = 0; idx < 100; idx++) {
+        EXPECT(moved[idx] == 0x77);
+    }
+
     arena_deinit(&a);
     EXPECT(t.live_count == 0);
 }
@@ -1394,13 +1463,20 @@ static void test_adapter_contract(void)
     EXPECT(arena_used(&a) == used_before);
 
     /* A garbage size stays a no-op instead of wrapping into a bogus
-     * cursor rollback. */
+     * cursor rollback. The invalid free released nothing, so second is
+     * still live below. */
     alloc_free(&ad, second, huge, 0);
     EXPECT(arena_used(&a) == used_before);
 
     /* Realloc through the adapter: last allocation grows in place. */
     bytes = alloc_realloc(&ad, second, TEST_SMALL, TEST_LARGE, 0);
     EXPECT((void *)bytes == second);
+
+    /* The adapter stays usable after a reset; only memory handed out
+     * before the reset is dead. */
+    arena_reset(&a);
+    first = alloc_alloc(&ad, TEST_SMALL, 0);
+    EXPECT(first != NULL);
 
     /* NULL arena: the adapter is inert. */
     ad = arena_allocator(NULL);
@@ -1494,7 +1570,7 @@ static void test_alignment_with_misaligning_parent(void)
     size_t align;
 
     EXPECT(arena_init_sized(&a, parent, 256, 1024) == ARENA_OK);
-    for (align = 1; align <= 4096; align *= 2) {
+    for (align = 1; align <= ARENA_MAX_ALIGN; align *= 2) {
         ptr = arena_alloc_n(&a, 1, TEST_SMALL, align);
         EXPECT(ptr != NULL);
         EXPECT(test_is_aligned(ptr, align));
@@ -1702,6 +1778,13 @@ static void test_asan_poisoning(void)
     probe = alloc_alloc(&ad, TEST_MEDIUM, 0);
     EXPECT(probe != NULL);
     alloc_free(&ad, probe, TEST_MEDIUM, 0);
+    EXPECT(__asan_address_is_poisoned(probe));
+
+    /* Reset poisons every rewound region too. */
+    probe = arena_alloc(&a, TEST_MEDIUM);
+    EXPECT(probe != NULL);
+    memset(probe, 3, TEST_MEDIUM);
+    arena_reset(&a);
     EXPECT(__asan_address_is_poisoned(probe));
 
     arena_deinit(&a);

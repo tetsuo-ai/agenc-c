@@ -1,7 +1,6 @@
 /* main.c: a printable walkthrough of the arena public API. */
 
 #include <stdio.h>
-#include <string.h>
 
 #include "alloc.h"
 #include "arena.h"

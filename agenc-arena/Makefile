@@ -22,7 +22,8 @@ DEMO_SRC = main.c
 DEMO_BIN = arena_demo
 FORMAT_FILES = $(wildcard include/*.h src/*.c tests/*.c main.c)
 
-.PHONY: test asan iso release heapless fuzz valgrind analyze format check demo clean
+.PHONY: test asan iso release heapless fuzz valgrind valgrind-heapless analyze format check \
+	demo clean
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)
@@ -42,7 +43,7 @@ iso: $(ISO_BIN)
 	./$(ISO_BIN)
 
 $(ISO_BIN): $(TEST_SRC) $(SRC) $(HDRS) Makefile
-	$(ARENA_COMPILE) -DARENA_STRICT_ISO $(LDFLAGS) -o $@ $(TEST_SRC) $(SRC) $(LDLIBS)
+	$(ARENA_COMPILE) -DARENA_STRICT_ISO -O2 $(LDFLAGS) -o $@ $(TEST_SRC) $(SRC) $(LDLIBS)
 
 release: $(RELEASE_BIN)
 	./$(RELEASE_BIN)
@@ -80,9 +81,13 @@ demo: $(DEMO_BIN)
 $(DEMO_BIN): $(DEMO_SRC) $(SRC) $(HDRS) Makefile
 	$(ARENA_COMPILE) $(LDFLAGS) -o $@ $(DEMO_SRC) $(SRC) $(LDLIBS)
 
+valgrind-heapless: $(HEAPLESS_BIN)
+	$(VALGRIND) --error-exitcode=1 --leak-check=full --errors-for-leak-kinds=all \
+		--child-silent-after-fork=yes ./$(HEAPLESS_BIN)
+
 analyze:
 	gcc -fanalyzer $(ARENA_CPPFLAGS) $(ARENA_CFLAGS) -c $(SRC) -o /dev/null
-	$(CLANG) --analyze $(ARENA_CPPFLAGS) -std=c11 $(SRC) -o /dev/null
+	$(CLANG) --analyze $(ARENA_CPPFLAGS) $(ARENA_CFLAGS) $(SRC) -o /dev/null
 
 format:
 	$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
@@ -91,4 +96,4 @@ check: format $(DEMO_BIN) test asan iso release heapless
 
 clean:
 	rm -f $(TEST_BIN) $(ASAN_BIN) $(ISO_BIN) $(RELEASE_BIN) $(HEAPLESS_BIN) \
-		$(VG_BIN) $(FUZZ_BIN) $(DEMO_BIN)
+		$(VG_BIN) $(FUZZ_BIN) $(DEMO_BIN) tests/crash-*

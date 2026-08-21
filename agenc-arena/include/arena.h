@@ -83,8 +83,9 @@ struct arena_block;
  * every live allocation, the cursor, the block chain, the free list, and
  * all statistics stay exactly as they were. After a failure is recorded,
  * allocation calls return NULL without changing the arena until
- * arena_clear_error or arena_reset. Queries, temp ends, reset, trim, and
- * deinit remain available while an error is sticky.
+ * arena_clear_error or arena_reset. Queries, temp scopes (begin and
+ * end), the adapter's xfree, reset, trim, and deinit remain available
+ * while an error is sticky.
  */
 typedef struct arena {
     alloc_t parent;
@@ -158,8 +159,9 @@ arena_status_t arena_init_sized(arena_t *a, alloc_t parent, size_t min_block, si
  * bookkeeping. The buffer must outlive the arena and is never freed by
  * it. Under checking builds the buffer stays poisoned while the arena
  * lives; call arena_deinit before reusing or discarding the storage. A
- * NULL buffer or zero size records ARENA_ERR_ARG. NULL arena is a
- * no-op.
+ * NULL buffer or zero size records ARENA_ERR_ARG; a size above
+ * PTRDIFF_MAX records ARENA_ERR_OVERFLOW before any buffer access.
+ * NULL arena is a no-op.
  */
 void arena_init_fixed(arena_t *a, void *buffer, size_t size);
 

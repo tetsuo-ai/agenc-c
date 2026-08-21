@@ -240,7 +240,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (fixed) {
         arena_init_fixed(&a, fixed_buffer, sizeof(fixed_buffer));
     } else {
-        assert(arena_init_sized(&a, parent_alloc, 256, 8192) == ARENA_OK);
+        arena_status_t init_status = arena_init_sized(&a, parent_alloc, 256, 8192);
+
+        assert(init_status == ARENA_OK);
+        (void)init_status;
     }
     adapter = arena_allocator(&a);
 

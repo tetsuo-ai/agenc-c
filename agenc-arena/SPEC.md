@@ -70,13 +70,18 @@ probing.
 ### 1.3 xalloc
 
 - `size == 0`: must return NULL. This is success; no allocation was
-  performed and nothing needs releasing. A zero-size request cannot fail,
-  so `size != 0 && result == NULL` is the complete failure test.
+  performed and nothing needs releasing, so `size != 0 && result ==
+  NULL` is the complete failure test. (The arena entry points validate
+  align before their zero-size return, so a zero-size request with an
+  invalid align still records a status; see 2.4.)
 - `size > 0`: returns a pointer to at least `size` bytes whose address is
   a multiple of the effective alignment, or NULL if and only if the
-  request cannot be fulfilled (out of memory, unsupported alignment, or
-  internally unrepresentable size; callers cannot distinguish these and
-  must not need to).
+  request cannot be fulfilled (out of memory, unsupported alignment,
+  internally unrepresentable size, or an earlier failure the backend
+  latched; callers cannot distinguish these and must not need to). A
+  latching backend, such as an arena with its sticky status, refuses
+  every request after a failure until its owner intervenes;
+  probe-and-retry does not work through the interface.
 - The memory is uninitialized. No zeroing is promised.
 - Implementations must reject `size > PTRDIFF_MAX` with NULL.
 - The block stays valid until passed to xfree or xrealloc of an equal
@@ -91,7 +96,9 @@ Preconditions; violating any is a contract violation (see 4.4):
 
 - `new_size != 0`. Freeing through realloc is forbidden; xfree exists.
   This deletes the realloc(p, 0) divergence that C23 declared UB
-  (WG14 N2464).
+  (WG14 N2464). At the vtable boundary this stays a pure violation; the
+  arena entry point detects it in every build and records
+  ARENA_ERR_ARG.
 - `align` equals the align of the call that allocated `ptr`.
 - If `ptr == NULL` then `old_size == 0`, and the call behaves exactly
   like `xalloc(ctx, new_size, align)`.
@@ -109,7 +116,8 @@ Behavior:
   owned by the caller, and must still be released eventually.
 - Shrinking may fail like any other call (the Lua 5.4 rule), but a failed
   shrink is always recoverable because the old block still holds all the
-  data. The built-in backends never fail a shrink.
+  data. The libc and null backends never fail a shrink; an arena adapter
+  can, through its sticky latch or its move path.
 - Implementations should resize in place when they can; relocation is
   always permitted.
 
@@ -270,13 +278,15 @@ void arena_clear_error(arena_t *a);
 - `arena_init_sized`: validates `ARENA_FIXED_OVERHEAD <= min_block <=
   max_block <= PTRDIFF_MAX` (the constant doubles as the smallest block
   able to hold the block header); returns and records ARENA_ERR_ARG
-  otherwise.
+  otherwise. A NULL arena returns ARENA_ERR_ARG with no object to
+  record it on.
 - `arena_init_fixed`: the arena serves from `buffer` only and fails with
   ARENA_ERR_ALLOC when it is exhausted. Any `buffer` alignment is
   accepted; the first allocation aligns internally. A small bookkeeping
   region is carved from the front of the buffer;
   `ARENA_FIXED_OVERHEAD` names its worst-case size so tests and callers
-  can size buffers. The intended buffer is a static or automatic
+  can size buffers. A size above PTRDIFF_MAX records ARENA_ERR_OVERFLOW
+  before any buffer access. The intended buffer is a static or automatic
   `_Alignas(max_align_t) unsigned char` array or memory from an
   allocator; see the effective-type note in 4.5. The buffer must outlive
   the arena. `size == 0` or NULL buffer with nonzero size records
@@ -286,8 +296,9 @@ void arena_clear_error(arena_t *a);
   arena_init left it in, minus a bumped generation. Accepts NULL and
   already-deinitialized objects. Never fails.
 - `arena_reset`: invalidates every outstanding allocation and open temp
-  scope, rewinds to empty, retains normal blocks (first block stays
-  current, others move to the free list), returns oversize blocks to the
+  scope, rewinds to empty, retains normal blocks (the oldest normal
+  block stays current, others move to the free list; an all-oversize
+  chain leaves current NULL), returns oversize blocks to the
   parent, clears the sticky status, zeroes `used`, keeps `high_water`,
   bumps `generation`, and sets `temp_depth` to 0. Usable while a sticky
   error is set.
@@ -315,8 +326,9 @@ Common rules:
   changing the arena, until arena_clear_error or arena_reset. Chain
   allocations, check once; but note that using any returned pointer still
   requires it to be non-NULL.
-- Zero total size returns NULL as success: no status is recorded, sticky
-  state is unchanged. `arena_failed(a)` distinguishes this from failure.
+- Zero total size returns NULL as success: no status is recorded,
+  sticky state is unchanged. align is validated before the zero-size
+  return, so an invalid align is reported even for zero-size requests. `arena_failed(a)` distinguishes this from failure.
 - `align` follows the interface rules (1.2). The arena supports any
   power-of-two align up to `ARENA_MAX_ALIGN` (65536), including values
   above max_align_t; padding comes out of the current block.
@@ -386,13 +398,14 @@ scope (RESEARCH.md D-scratch, E2).
 alloc_t arena_allocator(arena_t *a);
 ```
 
-Returns an alloc_t whose ctx is `a`:
+Returns an alloc_t whose ctx is `a`, or an inert always-failing value
+for a NULL arena:
 
 - xalloc bumps the arena (recording sticky status on failure as usual).
 - xrealloc follows arena_realloc.
 - xfree rolls the cursor back when given the most recent live allocation
-  (making LIFO alloc/free pairs cost zero net memory) and is a no-op
-  otherwise.
+  (making LIFO alloc/free pairs cost zero net memory apart from
+  alignment padding, which stays consumed) and is a no-op otherwise.
 - The adapter inherits single-owner thread semantics from the arena. The
   allocator value dies with the arena: resetting or deinitializing the
   arena invalidates every block it handed out, without individual frees.
@@ -415,8 +428,10 @@ size_t arena_committed(const arena_t *a);        /* NULL: 0 */
 size_t arena_high_water(const arena_t *a);       /* NULL: 0 */
 ```
 
-Statistics semantics: `used` counts bytes of live allocations including
-alignment padding; `committed` counts bytes held from the parent or the
+Statistics semantics: `used` counts live bytes handed out, alignment
+padding and ASan redzones included; the padding and redzone of an
+abandoned realloc source stay counted until rewind. `committed` counts
+bytes held from the parent or the
 fixed buffer, including block headers and the free list; `high_water` is
 the maximum `used` has reached since init (reset preserves it, deinit
 does not). These exist because every surveyed production arena grew them
@@ -448,11 +463,19 @@ Observable contract, all behind feature detection, zero cost otherwise:
   released to the parent. Per-block anchoring is required because
   MEMPOOL_TRIM is range-based and one arena-wide pool would discard
   live chunks in sibling blocks.
-- Debug fills (`!defined(NDEBUG)`, no sanitizer): fresh allocations are
-  filled with 0xA5, rewound and freed regions with 0x5A (jemalloc's
-  junk convention). Under ASan the fill is skipped; poison is stronger.
-- `ARENA_DISABLE_SANITIZER_HOOKS` turns all of it off for exotic
-  toolchains.
+- Debug fills (`!defined(NDEBUG)`, no tracking tool): fresh allocations
+  are filled with 0xA5, rewound and freed regions with 0x5A (jemalloc's
+  junk convention). Under ASan, MSan, or Valgrind the fill is skipped;
+  the tool's own tracking is stronger.
+- `ARENA_DISABLE_SANITIZER_HOOKS` turns the sanitizer hooks off for
+  exotic toolchains; debug fills stay governed by NDEBUG (and by the
+  absence of any tracking tool).
+- Blocks return to the parent with their interior bytes still poisoned
+  under ASan; a custom parent that inspects or fills memory inside
+  xfree must account for that. A fixed arena's buffer stays poisoned
+  while the arena lives; arena_deinit hands it back fully addressable
+  with unspecified contents. The strict-ISO launder barrier is enabled
+  by building with `ARENA_STRICT_ISO`.
 
 ## 4. Cross-cutting rules
 
@@ -460,8 +483,9 @@ Observable contract, all behind feature detection, zero cost otherwise:
 
 Follows agenc-str: the first failure records its status on the arena;
 later allocation calls return NULL and change nothing until
-arena_clear_error or arena_reset. Queries, temp_end, reset, trim, and
-deinit remain available while an error is sticky. arena_status_name
+arena_clear_error or arena_reset. Queries, temp scopes (begin and end),
+the adapter's xfree, reset, trim, and deinit remain available while an
+error is sticky. arena_status_name
 returns a borrowed static string; unknown values map to
 "ARENA_ERR_UNKNOWN".
 
@@ -521,7 +545,7 @@ never forwards an invalid align to its parent.
 
 ### 4.6 Function attributes
 
-GNU/Clang builds annotate, behind version guards: the four bump entry
+GNU/Clang builds annotate, behind compiler detection: the four bump entry
 points (arena_alloc, arena_alloc_zeroed, arena_alloc_n,
 arena_alloc_n_zeroed) get the malloc attribute plus alloc_size (usable
 size equals requested size). arena_memdup and arena_realloc get

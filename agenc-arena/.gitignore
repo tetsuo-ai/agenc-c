@@ -1,0 +1,13 @@
+tests/test_arena
+tests/test_arena_asan
+tests/test_arena_iso
+tests/test_arena_release
+tests/test_arena_heapless
+tests/test_arena_vg
+tests/fuzz_arena
+tests/crash-*
+arena_demo
+*.o
+tests/corpus/*
+!tests/corpus/seed_*
+!tests/corpus/regress_*

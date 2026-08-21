@@ -16,8 +16,8 @@ in the literature as "region" (Tofte-Talpin), "zone" (Ross 1967, V8),
 
 | Implementation | Layout | Growth | Align | Reset keeps blocks | OOM policy |
 | --- | --- | --- | --- | --- | --- |
-| Hanson CII arena | chained chunks | request + 10KB flat | fixed max | yes (global cache) | longjmp exception |
-| glibc obstack | chained chunks | chunk_size min, +12.5% slack | per-obstack mask | frees dead chunks | global handler, abort |
+| Hanson CII arena | chained chunks | request + MEMINCR KB (lcc: 10) | fixed max | yes (global cache) | longjmp exception |
+| glibc obstack | chained chunks | chunk_size min, +12.5% slack | per-obstack mask | frees dead chunks | global handler, exit |
 | APR pools | blocks + size-class recycler | flat, recycled | fixed 8 | yes | per-pool abort_fn else NULL |
 | nginx ngx_pool_t | equal blocks + large list | flat (pool size) | word, opt-out | yes (frees larges) | NULL |
 | LLVM BumpPtrAllocator | slab vector, no headers | 4KB, doubles per 128 slabs | per-call, floor 8 | first slab only | delegates (fatal) |
@@ -119,7 +119,8 @@ E1. Speed. Hanson 1990 measured about 8 VAX instructions per allocation
 against about 26 for first fit; replacing quick fit with arenas in lcc
 improved total compiler runtime 8-10%. Berger, Zorn, McKinley (OOPSLA
 2002) found regions the only custom-allocator class that still beat
-DLmalloc, by 21-47% on lcc. The 2026 re-evaluation (van Kempen and Berger,
+DLmalloc: the Lea allocator ran 21-47% slower across lcc and mudlle,
+with the abstract capping region wins at 44%. The 2026 re-evaluation (van Kempen and Berger,
 arXiv:2605.17119) shows clean-heap wins over mimalloc-class allocators
 shrink to 0-15%, but under a realistically fragmented heap naive
 allocation degrades up to 2x while region code is unaffected, traced to
@@ -139,9 +140,11 @@ region), and documentation naming the anti-patterns (producer-consumer,
 unbounded buffers, event-driven lifetimes; protobuf keeps strings off
 arena for exactly this reason).
 
-E3. The published Hanson fast-path macro had a real bug (Briggs 1991
-correspondence): it bumped the cursor before the overflow test. Test
-first, in integer space, then bump.
+E3. Hanson's published inline fast path had a real bug (the Briggs
+correspondence appended to the author's copy of the paper): it bumped
+the cursor before the overflow test, leaving a permanent gap when the
+slow path extended the arena in place. Test first, in integer space,
+then bump.
 
 E4. Locality details are measured. Gay and Aiken 1998: putting hot small
 objects in one region and cold large ones in another sped moss up 24%;
@@ -153,7 +156,8 @@ that one live object pinning a region is the fundamental space hazard.
 
 E5. Slab/pool is the complement, never the competitor. Bonwick 1994:
 object caches win for same-type objects with constructed state and
-individual churn (33us to 5.7us on stream heads). Batch-shaped lifetimes
+individual churn (allocating and freeing a stream head fell from 33us
+to 5.7us combined). Batch-shaped lifetimes
 belong to arenas. agenc-ds can layer pools on top of the arena later.
 
 E6. Security. Cling (USENIX Security 2010) documents that custom
@@ -168,9 +172,11 @@ belong in a general arena.
 
 P1. Alignment is a parameter in every post-2010 design: Vulkan
 VkAllocationCallbacks, Zig std.mem.Allocator, Odin, C++ pmr, jemalloc
-extent hooks. Callers repeat the original alignment on realloc and free
-(Vulkan, Zig, pmr precondition), so implementations never store it. Byte
-units, power of two; a log2 encoding invites unit bugs in C.
+extent hooks. Callers repeat the original alignment on realloc (Vulkan)
+and on both realloc and free (Zig, pmr precondition), so
+implementations never store it; Vulkan's free takes neither size nor
+alignment, which is exactly the header tax the sized design avoids.
+Byte units, power of two; a log2 encoding invites unit bugs in C.
 
 P2. Sized deallocation won. Lua osize, Zig slice lengths, Odin old_size,
 FreeType cur_size (1996), pmr deallocate(p, bytes, alignment), C23
@@ -231,9 +237,9 @@ bug class).
 
 H4. Do not assume parent blocks are more than max_align_t aligned, and
 some implementations return even less for small blocks (WG14 N2293
-documents the strong/weak alignment split among malloc implementations;
-32-bit glibc and the Windows heap are the classic under-max_align_t
-examples). Run the round-up on every allocation including the first.
+documents the strong/weak alignment split; its weak list names the
+Windows CRT and the jemalloc-family libcs such as FreeBSD, NetBSD, and
+Bionic, and LLVM D118804 adds tcmalloc and mimalloc). Run the round-up on every allocation including the first.
 aligned_alloc cannot be the over-alignment path: MSVC does not provide
 it.
 

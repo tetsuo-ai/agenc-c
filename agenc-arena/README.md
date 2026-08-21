@@ -11,8 +11,9 @@
 `arena` groups allocations by lifetime instead of tracking them one by
 one: allocate freely, then release everything at once with a temp scope,
 a reset, or deinit. Allocation is a bounds-checked pointer bump. Backing
-memory comes from a pluggable parent allocator (`alloc_t`), from libc by
-default, or from a caller-supplied fixed buffer for heap-free use.
+memory comes from a pluggable parent allocator (`alloc_t`), typically
+the libc backend, or from a caller-supplied fixed buffer for heap-free
+use.
 
 Terminology note: this is an arena in the region/bump sense (Hanson
 1990). jemalloc and glibc use the word "arena" for a sharded
@@ -128,7 +129,7 @@ libc backend is the default; `arena_allocator(&a)` presents an arena as
 the same interface, so a whole data structure can live inside one arena
 and vanish with one deinit. Freeing the most recent allocation through
 the adapter rolls the cursor back, so LIFO alloc/free pairs cost zero
-net memory.
+net memory apart from alignment padding, which stays consumed.
 
 ### Chain errors, check once
 

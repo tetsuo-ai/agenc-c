@@ -113,7 +113,9 @@ Set by agenc-str, which is the reference implementation for style:
 
 - Layout: include/<name>.h, src/<name>.c, tests/, Makefile, README.md,
   LICENSE (MIT), .clang-format copied from agenc-str. C11, no
-  third-party dependencies. Each library is a standalone folder in the
+  third-party dependencies. (agenc-arena ships a second public header,
+  include/alloc.h, for the allocator interface; adoption stays copy the
+  headers and the one .c file.) Each library is a standalone folder in the
   tetsuo-ai/agenc-c monorepo; the root LICENSE and .clang-format are
   canonical and every library carries a byte-identical copy (enforced by
   the root make conventions gate). Per-library read-only mirror repos
@@ -121,7 +123,8 @@ Set by agenc-str, which is the reference implementation for style:
 - Adoption is "copy the header and the .c file", never "adopt a build
   system". The Makefile exists only to build tests and demos.
 - Symbol prefix is the short library name (str_, arena_, err_, bin_,
-  hash_, log_, os_, cli_; containers use ds_vec_/ds_map_/ds_list_).
+  hash_, log_, os_, cli_; containers use ds_vec_/ds_map_/ds_list_, and
+  agenc-arena additionally exports the alloc_ interface prefix).
   The agenc- prefix is for folder/repo names only.
 - Status/error style follows str: a <name>_status_t enum returned from
   fallible calls, sticky error state on stateful objects so mutators
@@ -130,6 +133,8 @@ Set by agenc-str, which is the reference implementation for style:
 - Tests build in plain, ASan/UBSan, ISO-pedantic, and release variants
   like agenc-str's tests/ folder.
 - All allocation through a passed-in allocator. No hidden malloc.
+  (agenc-str predates the allocator interface and manages its own heap
+  buffers; the rule binds every library from agenc-arena up.)
 - No global mutable state, no threads spawned, no signal handlers.
 - All inputs are pointer+length. All parsers assume hostile input.
 - Errors are return values. No exit/abort in library code; asserts

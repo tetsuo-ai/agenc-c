@@ -349,10 +349,19 @@ public API (the guard bounds the arithmetic and keeps the ILP32 case
 trivially safe), and the libc failed-shrink fallback is unreachable on
 glibc, which never fails a shrink in practice.
 
-Source fact-check outcome: the standards cluster verified 11 of 13
-claims against primary sources; the one material contradiction
-(RESEARCH.md attributed weak malloc alignment to musl against WG14
-N2293's actual classification) is corrected, and one citation stretch
-(EXP39-C cited for the storage-provision gap) now cites C11 6.5
-directly. The remaining fact-check categories completed without
-material findings beyond these.
+Source fact-check outcome: roughly sixty load-bearing claims across
+RESEARCH.md and the READMEs were verified against primary sources and
+the code. Corrected as a result: the musl weak-alignment attribution
+(WG14 N2293 classifies musl as strong; the weak list is the Windows
+CRT and jemalloc-family libcs), the Vulkan half of the
+repeat-alignment-on-free claim (Vulkan's free takes neither size nor
+alignment), the 21-47 percent Berger figure now attributed to lcc and
+mudlle jointly, the EXP39-C citation stretch, four sub-material
+nuances (Hanson's bug was in the published inline path, the CII slack
+is a tunable, Bonwick's stream-head figure is alloc plus free, obstack
+exits rather than aborts), and the family-convention wording in the
+root README and LIBRARIES.md, which now say plainly that agenc-str
+predates the alloc_t interface and the no-hidden-malloc rule binds
+from agenc-arena up. Everything else checked out, including the
+quick-start example compiling verbatim and every documented constant
+matching the headers.

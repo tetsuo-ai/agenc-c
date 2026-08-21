@@ -38,10 +38,12 @@ Set by agenc-str and agenc-arena, binding for every library:
 
 - C11, no third-party dependencies, hosted standard library only.
 - All allocation goes through the `alloc_t` interface from agenc-arena;
-  no hidden malloc.
+  no hidden malloc. (agenc-str predates the interface and manages its
+  own heap buffers; the rule binds every library from agenc-arena up.)
 - Fallible calls return a `<name>_status_t` enum; stateful objects carry
   a sticky status; mutation is failure-atomic; library code never calls
-  exit or abort.
+  exit or abort (asserts detect contract violations in debug builds and
+  compile out of release builds).
 - All inputs are pointer plus length; parsers assume hostile input; all
   size arithmetic is overflow-checked and capped at `PTRDIFF_MAX`.
 - No global mutable state, no threads spawned, no signal handlers.
